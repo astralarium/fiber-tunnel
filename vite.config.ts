@@ -16,7 +16,7 @@ export default defineConfig({
     dts({
       tsconfigPath: "./tsconfig.app.json",
       exclude: ["**/*.test.*"],
-      rollupTypes: true,
+      bundleTypes: true,
     }),
   ],
   build: {
