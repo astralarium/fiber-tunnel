@@ -31,5 +31,5 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Build Docs
-        run: pnpm build:docs
+      - name: Build Pages
+        run: pnpm build:pages

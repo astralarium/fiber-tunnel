@@ -4,12 +4,12 @@ React tunnel that renders content in fiber-tree order.
 
 [Docs](https://astralarium.github.io/fiber-tunnel/)
 | [Github](https://github.com/astralarium/fiber-tunnel)
-| [NPM](https://www.npmjs.com/package/@astralarium/fiber-tunnel)
+| [NPM](https://www.npmjs.com/package/fiber-tunnel)
 
 ## Installation
 
 ```bash
-npm i @astralarium/fiber-tunnel
+npm i fiber-tunnel
 ```
 
 Requires React 19.2 or later.
@@ -17,8 +17,8 @@ Requires React 19.2 or later.
 ## Usage
 
 ```tsx
-import { fiberTunnel } from "@astralarium/fiber-tunnel";
 import { Canvas } from "@react-three/fiber";
+import { fiberTunnel } from "fiber-tunnel";
 
 const overlay = fiberTunnel();
 

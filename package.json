@@ -34,7 +34,8 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -b && eslint . && vite build && pnpm pack --out pack/%s-%v.tgz",
-    "build:docs": "typedoc",
+    "build:pages": "typedoc && cp site/index.html dist-pages/",
+    "preview": "vite preview --outDir dist-pages --base /fiber-tunnel/",
     "prepublishOnly": "pnpm build",
     "lint": "eslint .",
     "check-types": "tsc -b",

@@ -1,7 +1,8 @@
 {
   "$schema": "https://typedoc.org/schema.json",
   "entryPoints": ["./src/index.ts"],
-  "out": "./dist-typedoc",
+  "out": "./dist-pages/docs",
+  "titleLink": "/fiber-tunnel/",
   "tsconfig": "./tsconfig.app.json",
   "name": "FiberTunnel",
   "readme": "./README.md",

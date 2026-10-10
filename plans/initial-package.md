@@ -1,4 +1,4 @@
-# Plan: initial `@astralarium/fiber-tunnel` package
+# Plan: initial `fiber-tunnel` package
 
 Extract `fiberTunnel` from `@astralarium/a11y-tree` into this package,
 shared by a11y-tree and pixi-three and offered upstream to tunnel-rat.

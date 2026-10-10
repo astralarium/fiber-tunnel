@@ -9,7 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
-dist-typedoc
+dist-pages
 pack
 *.local
 .env

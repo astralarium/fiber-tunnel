@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FiberTunnel</title>
+    <meta
+      name="description"
+      content="React tunnel that renders content in fiber-tree order"
+    />
+    <style>
+      /* a11y-tree dark theme tokens */
+      :root {
+        color-scheme: dark;
+        --radius: 0.25rem;
+        --background: hsl(165, 25%, 8%);
+        --foreground: oklch(0.985 0 0);
+        --card: oklch(0.145 0 0);
+        --primary: oklch(0.985 0 0);
+        --primary-foreground: oklch(0.205 0 0);
+        --muted-foreground: oklch(0.708 0 0);
+        --accent: oklch(0.33 0.055 168);
+        --accent-foreground: oklch(0.985 0 0);
+        --border: oklch(0.295 0.015 170);
+        --ring: oklch(0.527 0.115 168);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 1rem;
+        background: var(--background);
+        color: var(--foreground);
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.5;
+      }
+      main {
+        width: 100%;
+        max-width: 36rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+      h1 {
+        margin: 0;
+        font-size: 2.5rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      p {
+        margin: 0;
+        color: var(--muted-foreground);
+        font-size: 1.125rem;
+      }
+      pre {
+        margin: 0;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9375rem;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+      a {
+        padding: 0.5rem 1.25rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--foreground);
+        font-weight: 500;
+        text-decoration: none;
+      }
+      a:hover {
+        background: var(--accent);
+        color: var(--accent-foreground);
+      }
+      a.primary {
+        border-color: var(--primary);
+        background: var(--primary);
+        color: var(--primary-foreground);
+      }
+      a.primary:hover {
+        opacity: 0.9;
+      }
+      a:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>FiberTunnel</h1>
+      <p>React tunnel that renders content in fiber-tree order</p>
+      <pre><code>npm i fiber-tunnel</code></pre>
+      <nav>
+        <a class="primary" href="docs/">Docs</a>
+        <a href="https://github.com/astralarium/fiber-tunnel">GitHub</a>
+      </nav>
+    </main>
+  </body>
+</html>
