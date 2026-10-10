@@ -1,0 +1,26 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["./src/index.ts"],
+  "out": "./dist-typedoc",
+  "tsconfig": "./tsconfig.app.json",
+  "name": "FiberTunnel",
+  "readme": "./README.md",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "kindSortOrder": [
+    "Function",
+    "Variable",
+    "Class",
+    "Interface",
+    "TypeAlias",
+    "Enum",
+    "Reference"
+  ],
+  "navigationLinks": {
+    "GitHub": "https://github.com/astralarium/fiber-tunnel"
+  },
+  "plugin": ["typedoc-rhineai-theme"]
+}
