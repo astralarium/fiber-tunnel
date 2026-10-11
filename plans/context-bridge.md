@@ -131,8 +131,8 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 
 - Structural signals release first, immediately:
   - `ready`: no Out mounted, the Out unmounts, or the Out is hidden.
-  - Probes: the anchor detaches, or the anchor commits without an In at
-    the probe's position.
+  - Probes: the probe's committed ancestor detaches, or commits without
+    an In at the probe's position.
 - Timers use `setTimeout`, outside both reconcilers, in every build. Their
   writes go through the store.
 - Acknowledgement window, 1 s: armed when a reader or In first suspends on
@@ -151,9 +151,12 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 ### Internals
 
 - Fiber fields: `return`, `child`, `sibling`, `alternate`, `stateNode`,
-  `tag`, `index`, `key`, `flags`, `lanes`, `memoizedState`, `pendingProps`.
-  Constants: `Incomplete` flag, Suspense/Offscreen/ContextProvider/HostRoot
-  tags, lane masks. Identical in React 19.2 and 19.3.
+  `tag`, `index`, `key`, `flags`, `subtreeFlags`, `lanes`,
+  `memoizedState`, `pendingProps`. Constants: `Incomplete` and
+  `Placement` flags, Suspense/Offscreen/ContextProvider/HostRoot tags,
+  lane masks. Identical in React 19.2 and 19.3.
+- FiberRoot `current`: an own, configurable data property, written once
+  per commit (Commit hook).
 - FiberRoot lane fields serve sanity checks only.
 - Sanity check on first use: the rendering fiber resolves, root lane fields
   are numbers, the class tag matches, a fresh sibling's lanes are a nonzero
@@ -178,7 +181,11 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 - `componentWillUnmount` marks the item hidden and checks after commit: a
   detached fiber removes the item; an attached one keeps it. Attached:
   the `return` chain reaches a HostRoot. Deletion nulls the deleted
-  subtree's top `return` in the mutation phase.
+  subtree's top `return` (both generations) in the mutation phase.
+- React skips `componentWillUnmount` for class fibers deleted inside a
+  hidden Offscreen. Hidden items re-check attachment at every hooked
+  commit of their roots (hidden items × depth); in fallback mode, at
+  every emit and `refresh()`. Detached removes the item.
 - The Out renders hidden items under `<Activity mode="hidden">`. Content
   keeps its state; its effects disconnect.
 - `componentDidMount` on the same instance shows the item.
@@ -225,23 +232,19 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   6.5k fibers: 0.3 ms; the whole-root walk takes 0.5–1 ms, 2–6 ms with
   20k fibers before the last In.
 - Keys replace the whole-root walk; `sortByFiberOrder` uses them too.
-- Keys compute in the Out's render, once per render. The store snapshot
-  stays the item list: `getSnapshot` runs on every emit, so a batch of
-  384 mounts sorts once.
-- Every Out render recomputes all keys and sorts. Any emit corrects any
-  earlier move. Unresolvable keys sort last.
-- Every In update checks its own position: `componentDidUpdate` computes
-  its key and compares it with its neighbors in the last sorted list. Out
-  of order emits; in order costs one path.
-- A moved component re-renders when its list builds fresh elements; React
-  Compiler skips `memo`. An In whose element its wrapper builds uncached
-  (`"use no memo"`) re-renders with it, so the move reaches the check.
-- A move that re-renders no In reorders its content at the next emit or
-  `refresh()`: a moved ancestor that memoizes its children, or reordered
-  element objects held in state. Lifecycles, refs, and flags stay silent
-  there; the DevTools hook fires but must load before react-dom.
-- A probe's key is its anchor's key, then its work-in-progress rank path
-  below the anchor; it precedes a committed item with an equal key. A
+- Sort cost scales with items per tunnel. Consumers nest tunnels
+  (a11y-tree: one per container), so n stays in the hundreds; flat
+  tunnels of thousands are out of scope.
+- Mounts, anchor-context changes, probe registrations, a commit-hook
+  move, and `refresh()` bump a sort generation carried in the store
+  snapshot. Unresolvable keys sort last.
+- Unmounts, reveals, and children-only updates keep the generation.
+- The Out memoizes the sorted list by generation: a discarded render
+  loses nothing, StrictMode double renders reuse it, and a batch of 384
+  mounts sorts once. `getSnapshot` runs on every emit and stays cheap.
+- A probe's key is its committed ancestor's key, then its
+  work-in-progress rank path below that ancestor; it precedes a committed
+  item with an equal key. A
   pass that also moves committed siblings orders the probe at commit,
   when it re-keys as a real item.
 - Hidden items keep their keys: an `Activity`-hidden In holds its
@@ -249,10 +252,73 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 - Groups rebuild from the flat sorted list each render; element caching
   keeps unchanged groups.
 
+### Commit hook
+
+- React writes `root.current = finishedWork` once per commit, after the
+  mutation phase, before layout effects. Root creation writes it before
+  any install; interrupted passes never write it.
+- Each FiberRoot on an item's path gets `current` redefined as an
+  accessor, installed from the first render of an In or `FiberAnchor` in
+  that root (`_reactInternals` is set before render). Install is
+  idempotent; replays and discarded passes are harmless. A monkey patch:
+  React offers no commit hook, and this is the only write into React's
+  objects.
+- One shared hook per root, under `Symbol.for("fiber-tunnel.commit-hook")`:
+  a protocol version and a listener set. Every fiber-tunnel copy
+  registers a listener; one accessor and one walk per root. A copy that
+  finds an unknown protocol version chains it as a foreign accessor.
+- Without a foreign accessor, the hook stores React's value and its
+  getter returns it. With one, get and set delegate to it: one source of
+  truth.
+- The setter writes the value, then calls each listener in its own
+  try/catch. A throw inside the setter would abort React's commit and
+  leave the root pending.
+- The hook stays for the root's lifetime; with no listeners it is
+  pass-through. It never restores a descriptor.
+- A listener walks `finishedWork`, descending only where
+  `subtreeFlags & Placement`. React clears Placement on the placed
+  fiber in the mutation phase; ancestors' `subtreeFlags` keep it. Skipped
+  subtrees bubble static flags only, so Placement never outlives its
+  commit.
+- A visited path fiber whose kept children left their old `index` order
+  (React's `placeChild` test, read from alternates) marks its tunnels'
+  re-sort. Inserts and deletions keep relative order and pass.
+- Path fibers: a module `WeakSet` of chain fibers, filled at
+  registration. The walk matches a node or its alternate: an ancestor
+  mounted in the registering commit has no alternate yet. Entries stay;
+  stale ones cost at most a re-sort. Path levels span roots, so
+  `FiberAnchor` moves in an outer root count.
+- Catches moves that re-render no In, moves under memoized ancestors,
+  reordered element objects, anchor moves, and moves inside hidden
+  `Activity` subtrees (at their offscreen commit, or at reveal when that
+  render deferred).
+- Cost per commit: 1–7 µs without placements, 4–30 µs for a mount or a
+  384-tile reorder, independent of root size.
+- The redefined field drops the FiberRoot to dictionary properties;
+  React's commit time shows no change.
+- Listeners only mark re-sorts; the emit runs in a microtask, and the Out
+  re-renders in its own commit before the next paint, as for cross-root
+  store publishes. Nothing renders mid-commit.
+- Each In mount checks the descriptor is still the shared hook. A
+  replaced accessor falls back.
+- Dev cross-check, at most once per 100 ms per tunnel: after a hooked
+  commit, recompute keys; a missed move warns and falls back.
+- Sanity at each root's first In mount: the hook's last stored value is
+  the HostRoot fiber the In's `return` chain reaches (this commit
+  fired the setter), and that commit's `subtreeFlags` carry Placement. Missing or non-configurable `current`,
+  a throwing install, or a failed check removes the tunnel's listener;
+  the tunnel then sorts on every emit and `refresh()` covers moves.
+- Every fallback warns in dev with its cause: failed sanity check,
+  replaced accessor, failed install, or a cross-check miss.
+
 ### Unchanged
 
-- Registration timing for urgent mounts, SSR, `FiberAnchor`, `refresh`,
-  and dev warnings.
+- Registration timing for urgent mounts, SSR, `FiberAnchor`, and dev
+  warnings. The commit hook installs at first render; items still
+  register at commit.
+- `refresh()` stays; its docs narrow to the fallback when the commit hook
+  is off. `FiberAnchor` docs drop "Moving the anchor needs the tunnel's
+  `refresh()`".
 
 ### Version
 
@@ -269,13 +335,13 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 - An urgent mount whose content suspends commits the In's siblings once
   before the fallback shows.
 - Promises come from a cache outside the suspending component, as in React.
-- Content follows a moved In when the In re-renders. Components that
-  render an In build its element uncached (`"use no memo"`), so moving
-  them re-renders it.
-- Moves that re-render no In (a memoized ancestor, reordered element
-  objects) reorder content at the next tunnel change or `refresh()`.
-- Transition handling reads React internals, verified on 19.2 and 19.3.
-  Elsewhere the tunnel publishes after commit: transitions show fallbacks.
+- Content follows a moved In or `FiberAnchor` before the next paint.
+- Transition handling and move detection read React internals, verified
+  on 19.2 and 19.3. Move detection redefines `current` on each React root
+  holding Ins or anchors. Elsewhere the tunnel publishes after commit
+  (transitions show fallbacks) and sorts on every change.
+- `refresh()` re-reads order after a move. Needed only when the commit
+  hook is off; dev warns.
 
 ## Tests
 
@@ -312,7 +378,7 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 - keeps the probe's fibers when it becomes the real item
 - re-arms readiness when a restarted pass changes the probe's children
 - expires a probe whose mount pass never commits
-- drops a probe whose anchor commits without its In
+- drops a probe whose committed ancestor commits without its In
 - commits unverified when readiness times out
 - commits unverified when the Out never acknowledges a candidate
 - commits unverified while the Out is hidden
@@ -337,29 +403,56 @@ second `react-reconciler` instance with an in-memory host:
 - keeps content state while Activity hides its In
 - keeps content state while Suspense hides its In
 - removes content when its In unmounts
+- removes content when its subtree is deleted while hidden
+- removes content when a hidden Activity unmounts
 
 `describe("sort")`:
 
 - orders content by current positions after a parent bails out
-- reorders content when a re-sorted list re-renders its In without
-  changing its children
-- reorders content moved under a memoized ancestor at the next emit
-- skips the Out's render when an In re-renders unmoved with the same children
-- reorders content when an In's children change after a reorder
-- places a probe by its anchor's position before it commits
+- reorders content moved without re-rendering its In before the next paint
+- reorders content under a memoized ancestor
+- reorders content when its list reorders the same element objects
+- reorders anchored content when its anchor moves
+- reorders content moved inside a hidden Activity
+- skips the sort on a children-only update
+- skips the sort on a commit that inserts or deletes siblings without Ins
+- places a probe by its committed ancestor's position before it commits
 - orders a probe at commit when its pass also moves committed siblings
 - keeps an `Activity`-hidden In's content in position
 - orders a hidden primary before its Suspense fallback
-- drops an item whose subtree was deleted while hidden
 - orders a nested root's content by its anchor, then its own position
 - sorts once per Out render when many Ins mount in one commit
+
+`describe("commit hook")`:
+
+- fires once per commit in react-dom and `react-reconciler` roots
+- chains an accessor already on the root
+- shares one hook among tunnels on one root
+- shares one hook across fiber-tunnel copies
+- returns React's value when an earlier setter throws
+- completes the commit when a listener throws
+- keeps a chained accessor when falling back
+- detects a replaced accessor and falls back
+- emits after the commit, outside it
+- warns in dev when the cross-check finds a move the hook missed (test
+  hook drops a path fiber from the set)
+- chains a hook with an unknown protocol version as a foreign accessor
+- falls back to sorting on every emit when the commit hook fails its check
+- warns in dev when the commit hook falls back
 
 ## Sequencing
 
 1. fiber-tunnel:
-   - Dev dependency `react-reconciler` (0.34 for React 19.3, 0.33 for 19.2).
-   - Hiding, bridge, groups, status forwarding, transitions, mounts,
-     expiry and watchdog, internals checks, sort keys, tests, README.
+   - Dev dependency `react-reconciler` 0.34 (React 19.3); the CI matrix
+     installs 0.33 with React 19.2 separately.
+   - First, independent of bridging: sort keys, commit hook, hiding.
+   - Then bridge, groups, status forwarding, transitions, mounts, expiry
+     and watchdog, internals checks.
+   - Rewrite existing tests the plan changes: "drops a Suspense-hidden
+     In's content and restores it in place on reveal" (Hiding), "refresh
+     re-reads order after a keyed reorder of memoized Ins" and "picks up a
+     reorder of memoized items on the next tunnel update" (commit hook).
+   - Tests, README.
    - CI matrix: React 19.2 and 19.3, and the `react-reconciler` versions
      bundled by @pixi/react and r3f. Scheduled run against React canary
      releases.
@@ -368,8 +461,6 @@ second `react-reconciler` instance with an in-memory host:
    - Peer and dev dependency `fiber-tunnel` → `^0.2.0`.
    - Tunnels: `fiberTunnel({ bridge: true })`. Content wraps in
      `FiberProvider` inside the In.
-   - Components that render an In (`ThreeScene`, textures) build its
-     element uncached (`"use no memo"` helper).
    - `ThreeRoot`: `useContextBridge` + `ContextBridge`.
    - Delete `bridge-source.ts`, `bridge-tunnel.tsx`, `use-bridge.ts`, and
      `Bridge`/`BridgeProvider`/`BridgeLeaf`. Types stay `FiberTunnel`.
@@ -377,13 +468,11 @@ second `react-reconciler` instance with an in-memory host:
      under a bridged tunnel.
    - Measure `/example/context-bridge?tiles=384`: unread bump ≈ 2 ms React
      work; split the Out's re-sort from its reconciliation. Also a
-     texture mount, a texture props update, a transition bump, and a
-     re-sort of the tiles.
+     texture mount, a texture props update, a transition bump, a re-sort
+     of the tiles, and commit time with and without the commit hook.
 3. a11y-tree:
    - Peer and dev dependency `fiber-tunnel` → `^0.2.0`.
    - Replace its-fine's `useContextBridge` in `A11yTreeSlotGroup`,
      `A11yTreeSlot`, and `A11yTreeElement` with bridged tunnels.
-   - Those components build their In elements uncached (`"use no memo"`
-     helper).
 4. eternal-engine: bump fiber-tunnel, pixi-three, and a11y-tree; run
    `docs/skills/tableau-perf`.
