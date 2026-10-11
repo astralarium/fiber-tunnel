@@ -1,133 +1,128 @@
-import type { Component } from "react";
-
-/** The React fiber fields this package reads. */
-export interface Fiber {
-  return: Fiber | null;
-  child: Fiber | null;
-  sibling: Fiber | null;
-  alternate: Fiber | null;
-  stateNode: unknown;
-}
-
-/** A mounted class component's own fiber. */
-export function fiberOf(instance: Component): Fiber {
-  return (instance as unknown as { _reactInternals: Fiber })._reactInternals;
-}
-
-/** FiberRoot: stateNode of a root's top fiber. */
-export interface FiberRootLike {
-  current?: Fiber;
-}
-
-/** The fiber's FiberRoot, or null if detached. Works for stale fibers:
- * both HostRoot generations share a stateNode. */
-export function getFiberRoot(fiber: Fiber): FiberRootLike | null {
-  let node = fiber;
-  while (node.return) node = node.return;
-  const root = node.stateNode as FiberRootLike | null;
-  return root?.current ? root : null;
-}
+import {
+  type Fiber,
+  type FiberRootLike,
+  getFiberRoot,
+  sameFiber,
+} from "./fiber";
 
 /** One level of a position path: a fiber within one React root. */
 export interface FiberStep {
-  /** Anchor or In fiber. */
+  /** Anchor or In fiber; either generation. */
   fiber: Fiber;
-  /** Root its tree index is relative to. */
+  /** Root its rank path is relative to. */
   root: FiberRootLike;
 }
 
-/** Maps targets to preorder indices in the live tree; alternates match,
- * as targets may be stale. */
-function indexTargets(
+/** Sort key: per path level, each chain fiber's rank among its parent's
+ * current children, root down. */
+export type PathKey = (readonly number[])[];
+
+/** Sibling count past which a parent's child ranks are mapped. */
+const wideParent = 32;
+
+/** Per-sort child ranks of wide parents, by either child generation. */
+export type RankCache = Map<Fiber, Map<Fiber, [current: Fiber, rank: number]>>;
+
+/** Ranks of `fiber`'s chain below `root`'s current HostRoot, or null when
+ * the chain leaves that tree. `return` from either generation yields the
+ * logical chain; descent finds current generations. */
+function levelKey(
+  fiber: Fiber,
   root: FiberRootLike,
-  targets: Set<Fiber>,
-  indices: Map<Fiber, number>,
-) {
-  const start = root.current;
-  if (!start) return;
-  let found = 0;
-  let index = 0;
-  // Iterative: long sibling chains overflow recursion.
-  // Follows child/sibling only: stale return pointers dangle.
-  const stack: Fiber[] = [start];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    const isTarget =
-      targets.has(node) ||
-      (node.alternate != null && targets.has(node.alternate));
-    if (isTarget) {
-      indices.set(node, index);
-      if (node.alternate) indices.set(node.alternate, index);
-      if (++found >= targets.size) return;
+  cache: RankCache,
+): number[] | null {
+  const top = root.current;
+  if (!top) return null;
+  const chain: Fiber[] = [];
+  for (let n: Fiber | null = fiber; n; n = n.return) chain.push(n);
+  if (!sameFiber(chain.pop()!, top)) return null;
+  const key = new Array<number>(chain.length);
+  let parent = top;
+  for (let i = chain.length - 1, k = 0; i >= 0; i--, k++) {
+    const want = chain[i];
+    const ranks = cache.get(parent);
+    if (ranks) {
+      const hit = ranks.get(want);
+      if (!hit) return null;
+      [parent, key[k]] = hit;
+      continue;
     }
-    index++;
-    if (node.sibling) stack.push(node.sibling);
-    if (node.child) stack.push(node.child);
-  }
-}
-
-/** Same fiber, or its other generation. */
-export function sameFiber(a: Fiber, b: Fiber) {
-  return a === b || a.alternate === b;
-}
-
-/** Leading levels every path shares; sorting can skip them. */
-function sharedLevels(paths: readonly (readonly FiberStep[])[]) {
-  let n = 0;
-  for (;;) {
-    const first = paths[0]?.[n];
-    if (
-      !first ||
-      paths.some((p) => !p[n] || !sameFiber(p[n].fiber, first.fiber))
-    )
-      return n;
-    n++;
-  }
-}
-
-/** Orders keys level by level. */
-function compareKeys(a: readonly number[], b: readonly number[]) {
-  for (let i = 0; i < a.length && i < b.length; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return 0;
-}
-
-/** Sorts by path, outermost level first, by tree index; levels compare
- * only within one root. Empty or unresolvable paths sort last; ties keep
- * `order`. */
-export function sortByFiberPath<T>(
-  entries: readonly {
-    item: T;
-    path: readonly FiberStep[];
-    order: number;
-  }[],
-): T[] {
-  if (entries.length <= 1) return entries.map((entry) => entry.item);
-  // Shared levels need no walk of their outer root.
-  const skip = sharedLevels(entries.map((entry) => entry.path));
-  const paths = entries.map((entry) => entry.path.slice(skip));
-  const targetsByRoot = new Map<FiberRootLike, Set<Fiber>>();
-  for (const path of paths) {
-    for (const { root, fiber } of path) {
-      let targets = targetsByRoot.get(root);
-      if (!targets) targetsByRoot.set(root, (targets = new Set()));
-      targets.add(fiber);
+    let rank = 0;
+    let c = parent.child;
+    while (c && c !== want && c.alternate !== want) {
+      c = c.sibling;
+      if (++rank === wideParent) {
+        const map: Map<Fiber, [Fiber, number]> = new Map();
+        let r = 0;
+        for (let s = parent.child; s; s = s.sibling, r++) {
+          map.set(s, [s, r]);
+          if (s.alternate) map.set(s.alternate, [s, r]);
+        }
+        cache.set(parent, map);
+        const hit = map.get(want);
+        if (!hit) return null;
+        [c, rank] = hit;
+        break;
+      }
     }
+    if (!c) return null;
+    key[k] = rank;
+    parent = c;
   }
-  const indices = new Map<Fiber, number>();
-  for (const [root, targets] of targetsByRoot) {
-    indexTargets(root, targets, indices);
-  }
+  return key;
+}
 
-  return entries
-    .map((entry, i) => ({
-      ...entry,
-      key: paths[i].length
-        ? paths[i].map((step) => indices.get(step.fiber) ?? Infinity)
-        : [Infinity],
-    }))
-    .sort((a, b) => compareKeys(a.key, b.key) || a.order - b.order)
+/** Key of a path; `below` extends its last level. Null when a level does
+ * not resolve. */
+export function pathKey(
+  path: readonly FiberStep[],
+  cache: RankCache,
+  below?: readonly number[],
+): PathKey | null {
+  if (path.length === 0) return null;
+  const key: PathKey = [];
+  for (const step of path) {
+    const level = levelKey(step.fiber, step.root, cache);
+    if (!level) return null;
+    key.push(level);
+  }
+  if (below) key[key.length - 1] = [...key[key.length - 1], ...below];
+  return key;
+}
+
+function compareLevels(a: readonly number[], b: readonly number[]) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+
+/** Orders keys level by level; an ancestor precedes its descendants. */
+export function compareKeys(a: PathKey, b: PathKey) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const c = compareLevels(a[i], b[i]);
+    if (c !== 0) return c;
+  }
+  return a.length - b.length;
+}
+
+/** An entry to sort by key. */
+export interface KeyedEntry<T> {
+  item: T;
+  key: PathKey | null;
+  /** Tiebreak: earlier first. */
+  order: number;
+}
+
+/** Sorts by key; null keys sort last; ties keep `order`. */
+export function sortByKey<T>(entries: readonly KeyedEntry<T>[]): T[] {
+  return [...entries]
+    .sort((a, b) => {
+      if (a.key && b.key) return compareKeys(a.key, b.key) || a.order - b.order;
+      if (a.key) return -1;
+      if (b.key) return 1;
+      return a.order - b.order;
+    })
     .map((entry) => entry.item);
 }
 
@@ -141,12 +136,13 @@ export function sortByFiberOrder<
     fiber?: object | null;
   },
 >(items: readonly T[]): T[] {
-  return sortByFiberPath(
+  const cache: RankCache = new Map();
+  return sortByKey(
     items.map((item, order) => {
       const fiber = item.fiber as Fiber | null | undefined;
       const root = fiber && getFiberRoot(fiber);
-      const path = fiber && root ? [{ fiber, root }] : [];
-      return { item, path, order };
+      const key = fiber && root ? pathKey([{ fiber, root }], cache) : null;
+      return { item, key, order };
     }),
   );
 }

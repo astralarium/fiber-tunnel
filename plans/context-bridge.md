@@ -60,8 +60,9 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   roots share one source per original provider.
 - A source starts with its provider fiber's value. Content's first render
   sees the real value.
-- Every context is bridged. Providers inside content override bridged ones
-  (pixi-three's leaf `FiberProvider`).
+- Every context is bridged, except `FiberAnchorContext` into tunnel
+  content: content sits at the Out. Providers inside content override
+  bridged ones (pixi-three's leaf `FiberProvider`).
 
 ### Reading
 
@@ -72,7 +73,11 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   calls `use(context)`. A value change re-renders one reader per provider.
 - The reader classifies each change with `useDeferredValue(value)`: equal
   to `value` in a transition render, lagging in an urgent one.
-- `useContextBridge` reads owned sources inline; its host re-renders.
+- `useContextBridge` reads owned sources inline with the reader's logic
+  (one `useDeferredValue` over the owned values); its host re-renders. It
+  finds its fiber on mount from the state dispatcher React binds to the
+  rendering fiber (`Function.prototype.bind` patched around one
+  `useReducer` call); a miss yields an empty bridge and a dev warning.
 - Join and leave run in class lifecycles. A hidden owner leaves; the next
   member re-renders and reads.
 - The Out's provider holds two sequence-stamped values; the newer wins:
@@ -106,6 +111,11 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   value before paint.
 - An urgent change publishes after commit; suspending content forwards its
   status (Items).
+- A changed publish releases every candidate of its source; a candidate
+  absent from its source renders as lost, so the Out shows the committed
+  value. A candidate expires 60 s after `ready`: an abandoned transition
+  never publishes.
+- An Out in the reader's root takes the urgent path.
 
 ### Mounts
 
@@ -115,8 +125,9 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   by position: the index and key path from the In up to its nearest
   committed ancestor, stored under both of that ancestor's generations.
   Every restarted pass finds the same probe.
-- Each pass updates the probe's children; changed children re-arm
-  readiness.
+- Each pass updates the probe's children. Changed children re-arm verified
+  readiness, at most twice per probe: restarted passes re-create
+  children.
 - The Out renders a probe as `Suspense` (fallback null) › content › item
   gate. The Out acknowledges the probe when it renders it. The item gate
   fails open, resolves `ready`, and holds on `release`, as the provider
@@ -131,8 +142,9 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 
 - Structural signals release first, immediately:
   - `ready`: no Out mounted, the Out unmounts, or the Out is hidden.
-  - Probes: the probe's committed ancestor detaches, or commits without
-    an In at the probe's position.
+  - Probes: the probe's committed ancestor detaches, or a commit replaces
+    the occupant at the probe's position (recorded at registration)
+    without an In.
 - Timers use `setTimeout`, outside both reconcilers, in every build. Their
   writes go through the store.
 - Acknowledgement window, 1 s: armed when a reader or In first suspends on
@@ -151,23 +163,29 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 ### Internals
 
 - Fiber fields: `return`, `child`, `sibling`, `alternate`, `stateNode`,
-  `tag`, `index`, `key`, `flags`, `subtreeFlags`, `lanes`,
+  `tag`, `type`, `mode`, `index`, `key`, `flags`, `subtreeFlags`, `lanes`,
   `memoizedState`, `pendingProps`. Constants: `Incomplete` and
   `Placement` flags, Suspense/Offscreen/ContextProvider/HostRoot tags,
   lane masks. Identical in React 19.2 and 19.3.
 - FiberRoot `current`: an own, configurable data property, written once
   per commit (Commit hook).
 - FiberRoot lane fields serve sanity checks only.
-- Sanity check on first use: the rendering fiber resolves, root lane fields
+- Sanity check on first use, retried on later mounts while inconclusive
+  (render lanes outside `pendingLanes` or classified unlike the root's
+  next lanes: urgent updates and hidden passes entangle lanes): the rendering fiber resolves, root lane fields
   are numbers, the class tag matches, a fresh sibling's lanes are a nonzero
   subset of `root.pendingLanes`, and the sibling-lane classification agrees
   with the root's next lanes.
-- Microtask check at Out mount: a store emit from a layout effect commits
-  before a queued microtask.
+- Microtask check at Out mount: a store emit commits at the Out before a
+  microtask queued after it. Runs in a passive effect, after the store
+  subscribes.
 - Canary at Out mount, in the Out's own reconciler: a hidden item suspends
   on a tunnel-owned promise. The gate must report it not ready, then ready
-  once the promise resolves; a lane read in that pass must classify
-  correctly.
+  once the promise resolves; a lane read in that pass must carry
+  OffscreenLane. Transitions wait for both checks. Without Activity
+  (Hiding), the canary renders in the Out's mount pass and passes the
+  first-use sanity check; a gate that never renders past the suspension
+  resolves the promise after 50 ms.
 - A failed check switches the tunnel to publish-after-commit: transitions
   and mounts follow the urgent path.
 - Probe and gate components are classes; function components carry
@@ -178,8 +196,9 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 
 ### Hiding (all tunnels)
 
-- `componentWillUnmount` marks the item hidden and checks after commit: a
-  detached fiber removes the item; an attached one keeps it. Attached:
+- `componentWillUnmount` marks the item hidden and checks after commit, in
+  one emit: a detached fiber removes the item; an attached one keeps it.
+  An item with a forwarded status stays shown and hides once ready. Attached:
   the `return` chain reaches a HostRoot. Deletion nulls the deleted
   subtree's top `return` (both generations) in the mutation phase.
 - React skips `componentWillUnmount` for class fibers deleted inside a
@@ -187,7 +206,10 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
   commit of their roots (hidden items × depth); in fallback mode, at
   every emit and `refresh()`. Detached removes the item.
 - The Out renders hidden items under `<Activity mode="hidden">`. Content
-  keeps its state; its effects disconnect.
+  keeps its state; its effects disconnect. Reconcilers before React 19.1
+  (@pixi/react's 0.31; their FiberRoot keeps `finishedWork`) lack
+  Activity: a `Suspense` boundary suspended on a never-resolving promise
+  hides instead.
 - `componentDidMount` on the same instance shows the item.
 
 ### Groups (internal)
@@ -206,8 +228,9 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 
 ### Items (bridged)
 
-- Each item renders: error forwarder › `Suspense` (fallback `Pending`) ›
-  StrictMode when its In had it › content.
+- Each item renders: StrictMode when its In had it › error forwarder ›
+  `Suspense` (fallback `Pending`) › content. StrictMode at the placed
+  fiber replays content effects.
 - Each item has a status: ready, pending, or error. The In renders a
   `Status` child: error throws; pending calls `use(promise)`. The user's
   boundary above the In catches either.
@@ -215,7 +238,8 @@ Additive, except hiding: every tunnel keeps a hidden In's content.
 - `Pending`'s layout effect creates the promise and sets the pending
   status; its cleanup resolves the promise.
 - While the In suspends on its own item, the item stays visible at the
-  Out, so its content keeps loading.
+  Out, so its content keeps loading: a hide with a pending or error
+  status keeps the item shown.
 
 ### Sorting
 

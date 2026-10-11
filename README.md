@@ -13,6 +13,7 @@ npm i fiber-tunnel
 ```
 
 Requires React 19.2 or later.
+Supports Suspense and Activity.
 
 ## Usage
 
@@ -47,20 +48,44 @@ function App() {
 }
 ```
 
-`fiberTunnel()` returns `{ In, Out, refresh }`.
+`fiberTunnel()` returns `{ In, Out }`.
 Create tunnels at module scope or in a component with `useState`.
 
 ## Behavior
 
-- `Out` renders content in React tree order.
 - Wrap each nested React root's host in `<FiberAnchor>`,
   e.g. `<FiberAnchor><Canvas>…</Canvas></FiberAnchor>`.
   Unanchored roots have no defined order.
-- Updating an `In` updates content in place, preserving state and DOM.
 - Mount only one `Out` per tunnel.
-- Call `refresh()` after reordering `In`s or anchors.
-- Content appears one commit after `In` mounts.
-  `Out` mounted together with `In`s paints empty once.
-  SSR renders empty `Out`s until hydration.
+- SSR renders empty `Out`s until hydration.
+
+## Context bridging
+
+Bridge React context:
+
+```tsx
+const overlay = fiberTunnel({ bridge: true });
+```
+
+Bridged content renders at `In`.
+
+Inside nested roots, wrap bridged `In`s in `ContextBridge`:
+
+```tsx
+import { ContextBridge, FiberAnchor, useContextBridge } from "fiber-tunnel";
+
+function Scene({ children }: { children: ReactNode }) {
+  const bridge = useContextBridge();
+  return (
+    <FiberAnchor>
+      <Canvas>
+        <ContextBridge bridge={bridge}>{children}</ContextBridge>
+      </Canvas>
+    </FiberAnchor>
+  );
+}
+```
+
+## Acknowledgements
 
 Inspired by [tunnel-rat](https://github.com/pmndrs/tunnel-rat).

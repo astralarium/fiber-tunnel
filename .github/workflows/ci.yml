@@ -5,9 +5,67 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    # React canary releases.
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Lockfile: React 19.3, react-reconciler 0.34 (r3f's bundled version).
+          - name: react-19.3
+            build: true
+          - name: react-19.2
+            react: "~19.2.0"
+            reconciler: "0.33.0"
+          # @pixi/react's react-reconciler.
+          - name: react-19.3-reconciler-0.31
+            reconciler: "0.31.0"
+    name: test (${{ matrix.name }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install React ${{ matrix.react }}
+        if: matrix.react
+        run: >-
+          pnpm add -D react@${{ matrix.react }} react-dom@${{ matrix.react }}
+          @types/react@${{ matrix.react }}
+
+      - name: Install react-reconciler ${{ matrix.reconciler }}
+        if: matrix.reconciler
+        run: pnpm add -D react-reconciler@${{ matrix.reconciler }}
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        if: matrix.build
+        run: pnpm build
+
+      - name: Build Pages
+        if: matrix.build
+        run: pnpm build:pages
+
+  canary:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,11 +83,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install React canary
+        run: >-
+          pnpm add -D react@canary react-dom@canary
+          react-reconciler@canary
+
       - name: Test
         run: pnpm test
-
-      - name: Build
-        run: pnpm build
-
-      - name: Build Pages
-        run: pnpm build:pages

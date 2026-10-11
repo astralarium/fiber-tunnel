@@ -1,6 +1,6 @@
 import { createContext } from "react";
 
-import type { Fiber } from "./util";
+import type { Fiber } from "./fiber";
 
 /** A FiberAnchor's position, chained to the anchor above it. */
 export interface FiberAnchorValue {
