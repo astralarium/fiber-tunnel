@@ -31,6 +31,15 @@ export default defineConfig({
         ["react", "react/jsx-runtime", "react/compiler-runtime"].includes(id),
       // Bundling strips source directives; RSC needs this module client-side.
       output: { banner: '"use client";' },
+      // React Compiler consumes "use no memo" before bundling.
+      onwarn: (warning, warn) => {
+        if (
+          warning.code === "MODULE_LEVEL_DIRECTIVE" &&
+          warning.message.includes('"use no memo"')
+        )
+          return;
+        warn(warning);
+      },
     },
   },
   test: {
