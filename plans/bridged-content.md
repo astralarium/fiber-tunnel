@@ -26,21 +26,8 @@ Open: release order.
 
 ## 3. "Multiple renderers" warning
 
-pixi-three logs React's "Detected multiple renderers concurrently
-rendering the same context provider" for @pixi/react's application
-context, native in `<Application>` and bridged into the r3f root by
-ThreeRoot. One root yielded mid-render (non-blocking lanes only) with
-the provider pushed while the other renderer pushed it. fiber-tunnel
-adds non-blocking renders: `useSourceReads`' deferred follow-up,
-candidate transitions, the canary, retries. its-fine nulled the check
-on main.
+@pixi/react bundles its own Scheduler, so its renders interleave with
+r3f's mid-render, and both secondary renderers share one context slot.
+React's warning stays: fiber-tunnel cannot prevent the interleaving.
 
-1. pixi-three: un-silence main; record the clashing roots, their lanes,
-   and the yielded render's stack.
-2. Reproduce in `fiber-tunnel.cross-reconciler.test.tsx`, including a
-   wrong-value read.
-3. Fix: for the deferred follow-up, detect transitions with
-   `renderLanesOf` and drop `useDeferredValue`; otherwise dev-only
-   sigil nulling.
-
-Ships in its own release.
+Open: @pixi/react imports `scheduler` instead of bundling it (upstream).
