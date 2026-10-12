@@ -1333,6 +1333,118 @@ describe("bridge", () => {
     consoleError.mockRestore();
   });
 
+  test("rethrows a content error at the boundary above the Out when errors stay at the Out", async () => {
+    const consoleError = spyError();
+    const t = fiberTunnel({ bridge: true, errors: "out" });
+    function Throws(): ReactNode {
+      throw new Error("boom");
+    }
+    const out = await mountDomRoot(
+      <Boundary>
+        <t.Out />
+      </Boundary>,
+    );
+    render(
+      <Boundary>
+        <t.In>
+          <Throws />
+        </t.In>
+      </Boundary>,
+    );
+    await flush();
+    expect(within(out.container).getByText("caught boom")).toBeInTheDocument();
+    expect(screen.getAllByText("caught boom")).toHaveLength(1);
+    consoleError.mockRestore();
+  });
+
+  test("keeps the In's siblings mounted when content errors at the Out", async () => {
+    const consoleError = spyError();
+    const t = fiberTunnel({ bridge: true, errors: "out" });
+    function Throws(): ReactNode {
+      throw new Error("boom");
+    }
+    const out = await mountDomRoot(
+      <Boundary>
+        <t.Out />
+      </Boundary>,
+    );
+    const { container } = render(
+      <>
+        <button>Sibling</button>
+        <t.In>
+          <Throws />
+        </t.In>
+      </>,
+    );
+    await flush();
+    expect(labelsIn(container)).toEqual(["Sibling"]);
+    expect(within(out.container).getByText("caught boom")).toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
+  test("recovers content when the boundary above the Out resets", async () => {
+    const consoleError = spyError();
+    const t = fiberTunnel({ bridge: true, errors: "out" });
+    let broken = true;
+    function Flaky() {
+      if (broken) throw new Error("boom");
+      return <button>Fixed</button>;
+    }
+    const out = await mountDomRoot(
+      <Boundary key={0}>
+        <t.Out />
+      </Boundary>,
+    );
+    render(
+      <t.In>
+        <Flaky />
+      </t.In>,
+    );
+    await flush();
+    expect(within(out.container).getByText("caught boom")).toBeInTheDocument();
+
+    broken = false;
+    await act(async () =>
+      out.root.render(
+        <Boundary key={1}>
+          <t.Out />
+        </Boundary>,
+      ),
+    );
+    await flush();
+    expect(labelsIn(out.container)).toEqual(["Fixed"]);
+    consoleError.mockRestore();
+  });
+
+  test("surfaces a nested bridged tunnel's error at the outer Out's boundary", async () => {
+    const consoleError = spyError();
+    const outer = fiberTunnel({ bridge: true, errors: "out" });
+    const inner = fiberTunnel({ bridge: true, errors: "out" });
+    function Throws(): ReactNode {
+      throw new Error("boom");
+    }
+    const out = await mountDomRoot(
+      <Boundary>
+        <outer.Out />
+      </Boundary>,
+    );
+    const { container } = render(
+      <>
+        <outer.In>
+          <inner.Out />
+        </outer.In>
+        <inner.In>
+          <Throws />
+        </inner.In>
+        <button>Sibling</button>
+      </>,
+    );
+    await flush();
+    expect(within(out.container).getByText("caught boom")).toBeInTheDocument();
+    expect(labelsIn(container)).toEqual(["Sibling"]);
+    consoleError.mockRestore();
+  });
+
   test("shows the fallback above an In while its content loads", async () => {
     const t = fiberTunnel({ bridge: true });
     const resource = createResource<string>();

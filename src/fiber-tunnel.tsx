@@ -87,10 +87,14 @@ import { type FiberStep, pathKey, type RankCache, sortByKey } from "./util";
 /** Options of {@link fiberTunnel}. */
 export interface FiberTunnelOptions {
   /** Ins carry their ancestor context and StrictMode to the Out;
-   * content errors, suspensions, and transitions surface at the In.
+   * content suspensions and transitions surface at the In.
    * An urgent suspend commits the In's siblings once before the
    * fallback shows. */
   bridge?: boolean;
+  /** Bridged: where content errors surface. `"in"` (default) rethrows at
+   * the In; `"out"` lets them rise from the Out. Unbridged: always the
+   * Out. */
+  errors?: "in" | "out";
 }
 
 /** Props of {@link FiberTunnel.In}. */
@@ -222,6 +226,7 @@ function ranksBelow(fiber: Fiber, anchor: Fiber): number[] {
 /** Creates a tunnel: content from many Ins renders at one Out, in tree order. */
 export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
   const bridge = options.bridge ?? false;
+  const forwardErrors = (options.errors ?? "in") === "in";
   /** By React key at the Out. */
   const items = new Map<string, Item>();
   const listeners = new Set<() => void>();
@@ -859,6 +864,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           hidden={item.hidden}
           activity={activity}
           probe={item.probe}
+          forwardErrors={forwardErrors}
         >
           {item.children}
         </ItemView>

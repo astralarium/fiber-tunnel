@@ -136,22 +136,31 @@ export interface ItemViewProps {
   hidden: boolean;
   activity: boolean;
   probe: Probe | null;
+  /** Content errors rethrow at the In; false lets them rise from the
+   * Out. */
+  forwardErrors: boolean;
 }
 
 /** A bridged item at the Out: error forwarder › Suspense › content,
  * hidden with its In. */
 export class ItemView extends Component<ItemViewProps> {
   render() {
-    const { item, core, children, hidden, activity, probe } = this.props;
+    const { item, core, children, hidden, activity, probe, forwardErrors } =
+      this.props;
     if (probe) core.ackProbe(probe);
+    const content = (
+      <Suspense fallback={probe ? null : <Pending item={item} />}>
+        {children}
+        <ItemGate item={item} core={core} />
+      </Suspense>
+    );
     return (
       <Hideable hidden={hidden} activity={activity}>
-        <ErrorForwarder item={item}>
-          <Suspense fallback={probe ? null : <Pending item={item} />}>
-            {children}
-            <ItemGate item={item} core={core} />
-          </Suspense>
-        </ErrorForwarder>
+        {forwardErrors ? (
+          <ErrorForwarder item={item}>{content}</ErrorForwarder>
+        ) : (
+          content
+        )}
       </Hideable>
     );
   }

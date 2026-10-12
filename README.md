@@ -67,7 +67,11 @@ Bridge React context:
 const overlay = fiberTunnel({ bridge: true });
 ```
 
-Bridged content renders at `In`.
+Bridged content renders with the context above the `In`.
+
+Content errors rethrow at the `In`.
+Use `fiberTunnel({ bridge: true, errors: "out" })`
+to keep errors at the `Out`'s error boundary.
 
 Inside nested roots, wrap bridged `In`s in `ContextBridge`:
 
