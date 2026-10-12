@@ -1,6 +1,7 @@
 import type { ReactElement, ReactNode } from "react";
 
 import type { Fiber, MountPosition } from "./fiber";
+import type { FiberAnchorValue } from "./fiber-anchor-context";
 import type { Signal } from "./signal";
 import type { Capture } from "./sources";
 import type { FiberStep } from "./util";
@@ -46,12 +47,15 @@ export interface Item {
   id: number;
   /** React key at the Out; a probe's key carries over to its item. */
   key: string;
-  /** Enclosing anchors in other roots, outermost first, then the In (or a
-   * probe's committed ancestor). */
+  /** Anchors above the In, outermost first, then the In (or a probe's
+   * committed ancestor). */
   path: readonly FiberStep[];
   /** Probe: work-in-progress ranks below the last path level. */
   below: readonly number[] | null;
   children: ReactNode;
+  /** Bridged content's anchor: the In (a probe's work-in-progress fiber)
+   * under the In's anchor. */
+  anchor: FiberAnchorValue;
   /** The In is hidden; content keeps its state. */
   hidden: boolean;
   /** Bridged: providers and StrictMode above the In. */

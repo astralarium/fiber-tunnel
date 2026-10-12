@@ -20,6 +20,7 @@ import {
   type Fiber,
   type FiberRootLike,
   internalsLookSane,
+  markCompleted,
   OffscreenLane,
   priorWorkCompleted,
   renderingFiberOf,
@@ -27,6 +28,10 @@ import {
   SuspenseTag,
   topOf,
 } from "./fiber";
+import {
+  FiberAnchorContext,
+  type FiberAnchorValue,
+} from "./fiber-anchor-context";
 import { type Item, type ItemStatus, type Probe, setStatus } from "./item";
 import { createSignal, type Signal } from "./signal";
 import {
@@ -34,6 +39,7 @@ import {
   addGroup,
   groupReady,
   isLive,
+  markContent,
   markSourceProvider,
   removeGroup,
   type Source,
@@ -101,6 +107,22 @@ export function Group({ source, core, children }: GroupProps) {
 }
 markSourceProvider(Group);
 
+/** Props of {@link NativeGroup}. */
+interface NativeGroupProps {
+  source: Source;
+  /** The source's value, read by the Out under the source's provider. */
+  value: unknown;
+  children: ReactNode;
+}
+
+/** A source's provider at an Out under that source's own provider: the
+ * value updates in the same render as the provider. */
+export function NativeGroup({ source, value, children }: NativeGroupProps) {
+  const Provider = source.context;
+  return <Provider value={value}>{children}</Provider>;
+}
+markSourceProvider(NativeGroup);
+
 /** Props of {@link GroupGate}. */
 interface GroupGateProps {
   source: Source;
@@ -136,35 +158,47 @@ export interface ItemViewProps {
   hidden: boolean;
   activity: boolean;
   probe: Probe | null;
-  /** Content errors rethrow at the In; false lets them rise from the
-   * Out. */
-  forwardErrors: boolean;
+  /** Content's anchor: nested Ins order at the In. */
+  anchor: FiberAnchorValue;
+  /** Content errors and suspensions surface at the Out. */
+  isolate: boolean;
 }
 
 /** A bridged item at the Out: error forwarder › Suspense › content,
- * hidden with its In. */
+ * hidden with its In. Isolated: Suspense › Out boundary › content. */
 export class ItemView extends Component<ItemViewProps> {
   render() {
-    const { item, core, children, hidden, activity, probe, forwardErrors } =
+    const { item, core, children, hidden, activity, probe, anchor, isolate } =
       this.props;
     if (probe) core.ackProbe(probe);
+    markContent(anchor, item.capture);
+    const body = (
+      <FiberAnchorContext value={anchor}>{children}</FiberAnchorContext>
+    );
     const content = (
-      <Suspense fallback={probe ? null : <Pending item={item} />}>
-        {children}
+      <Suspense fallback={probe || isolate ? null : <Pending item={item} />}>
+        {isolate ? <OutBoundary>{body}</OutBoundary> : body}
         <ItemGate item={item} core={core} />
       </Suspense>
     );
     return (
       <Hideable hidden={hidden} activity={activity}>
-        {forwardErrors ? (
-          <ErrorForwarder item={item}>{content}</ErrorForwarder>
-        ) : (
+        {isolate ? (
           content
+        ) : (
+          <ErrorForwarder item={item}>{content}</ErrorForwarder>
         )}
       </Hideable>
     );
   }
 }
+
+/** Catches content suspensions at the Out; readiness gates count it
+ * completed. */
+function OutBoundary({ children }: { children: ReactNode }) {
+  return <Suspense fallback={null}>{children}</Suspense>;
+}
+markCompleted(OutBoundary);
 
 /** Never resolves. */
 const forever = createSignal();

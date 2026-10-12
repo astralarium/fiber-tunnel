@@ -11,6 +11,7 @@ import React, {
   type ReactElement,
   type ReactNode,
   StrictMode,
+  use,
   useLayoutEffect,
   useRef,
   useState,
@@ -29,6 +30,7 @@ import {
   type MicrotaskCheck,
   MicrotaskCheckView,
   MountGate,
+  NativeGroup,
   type StatusOwner,
   StatusView,
   type TunnelCore,
@@ -52,6 +54,7 @@ import {
   getFiberRoot,
   HostRootTag,
   internalsLookSane,
+  isAncestor,
   isAttached,
   mountPositionOf,
   OffscreenTag,
@@ -78,7 +81,9 @@ import {
   join,
   leave,
   type Member,
+  nativeProvidersAbove,
   type Source,
+  sourceAt,
   SourceReader,
   watchdogMs,
 } from "./sources";
@@ -86,15 +91,15 @@ import { type FiberStep, pathKey, type RankCache, sortByKey } from "./util";
 
 /** Options of {@link fiberTunnel}. */
 export interface FiberTunnelOptions {
-  /** Ins carry their ancestor context and StrictMode to the Out;
-   * content suspensions and transitions surface at the In.
-   * An urgent suspend commits the In's siblings once before the
-   * fallback shows. */
+  /** True (default): content acts as a child of its In: it reads the
+   * In's context and StrictMode; suspensions and transitions surface at
+   * the In; nested tunnel Ins order at the In. An urgent suspend commits
+   * the In's siblings once before the fallback shows.
+   * False: content acts as a child of the Out. */
   bridge?: boolean;
-  /** Bridged: where content errors surface. `"in"` (default) rethrows at
-   * the In; `"out"` lets them rise from the Out. Unbridged: always the
-   * Out. */
-  errors?: "in" | "out";
+  /** Content errors and suspensions surface at the Out;
+   * transitions proceed while content loads. */
+  isolate?: boolean;
 }
 
 /** Props of {@link FiberTunnel.In}. */
@@ -132,6 +137,13 @@ const multipleOutsError = "Multiple tunnel Outs mounted; each renders a copy.";
 const multipleRootsWarning =
   "Tunnel Ins span React roots in undefined order. Wrap nested React roots " +
   "in FiberAnchor; nested roots must bridge context.";
+
+/** Dev warning: one source's items interleave with others. */
+const splitGroupsWarning =
+  "fiber-tunnel: Ins under separate copies of a context provider " +
+  "interleave; their content renders in split provider groups and " +
+  "remounts when the split changes. Nested roots bridged with " +
+  "ContextBridge share providers.";
 
 /** Dev warning prefix: the tunnel sorts on every change. */
 const hookFallbackWarning =
@@ -225,8 +237,8 @@ function ranksBelow(fiber: Fiber, anchor: Fiber): number[] {
 
 /** Creates a tunnel: content from many Ins renders at one Out, in tree order. */
 export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
-  const bridge = options.bridge ?? false;
-  const forwardErrors = (options.errors ?? "in") === "in";
+  const bridge = options.bridge ?? true;
+  const isolate = options.isolate ?? false;
   /** By React key at the Out. */
   const items = new Map<string, Item>();
   const listeners = new Set<() => void>();
@@ -262,6 +274,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
   // Dev only.
   let mountedOuts = 0;
   let warnedRoots = false;
+  let warnedSplit = false;
 
   function subscribe(listener: () => void) {
     listeners.add(listener);
@@ -289,16 +302,24 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     });
   }
 
-  // Skip anchors in an already-listed root: the inner position is finer.
-  function pathOf(fiber: Fiber, anchor: FiberAnchorValue | null) {
+  /** Path of `fiber` under `anchor`. Skips anchors above the listed
+   * position: it is finer. An In anchoring bridged content is never above
+   * it. `from`: the In, when `fiber` is a probe's committed ancestor. */
+  function pathOf(
+    fiber: Fiber,
+    anchor: FiberAnchorValue | null,
+    from: Fiber = fiber,
+  ) {
     const path: FiberStep[] = [];
-    let root = getFiberRoot(fiber);
+    const root = getFiberRoot(fiber);
     if (root) path.push({ fiber, root });
+    let listed = root ? from : null;
     for (let a = anchor; a; a = a.parent) {
       const anchorRoot = getFiberRoot(a.fiber);
-      if (!anchorRoot || anchorRoot === root) continue;
+      if (!anchorRoot) continue;
+      if (listed && isAncestor(a.fiber, listed)) continue;
       path.unshift({ fiber: a.fiber, root: anchorRoot });
-      root = anchorRoot;
+      listed = a.fiber;
     }
     return path;
   }
@@ -350,14 +371,19 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     },
   };
 
+  /** A hidden item whose In left the tree; removed after commit. */
+  function detached(item: Item) {
+    if (!item.hidden || item.probe) return false;
+    const fiber = item.path[item.path.length - 1]?.fiber;
+    return !fiber || !isAttached(fiber);
+  }
+
   /** Removes hidden items whose In left the tree and probes whose mount
    * pass will not commit. True when content changed. */
   function afterCommit() {
     let changed = false;
     for (const item of items.values()) {
-      if (!item.hidden || item.probe) continue;
-      const fiber = item.path[item.path.length - 1]?.fiber;
-      if (fiber && isAttached(fiber)) continue;
+      if (!detached(item)) continue;
       remove(item);
       changed = true;
     }
@@ -441,7 +467,8 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     );
   }
 
-  /** Items in tree order, sorted once per generation. */
+  /** Items in tree order, sorted once per generation; detached items
+   * left out. */
   function sortedItems(): Item[] {
     if (!hookOn || !sortCache || sortCache.generation !== generation) {
       sortCache = { generation, keys: sortKeys() };
@@ -449,7 +476,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     const sorted: Item[] = [];
     for (const key of sortCache.keys) {
       const item = items.get(key);
-      if (item) sorted.push(item);
+      if (item && !detached(item)) sorted.push(item);
     }
     return sorted;
   }
@@ -569,7 +596,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       probesByAnchor.set(anchor, byPath);
       if (anchor.alternate) probesByAnchor.set(anchor.alternate, byPath);
     }
-    const path = pathOf(anchor, owner.context);
+    const path = pathOf(anchor, owner.context, fiber);
     const below = ranksBelow(fiber, anchor);
     const { children } = owner.props;
     const existing = byPath.get(positionKey);
@@ -615,6 +642,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       path,
       below,
       children,
+      anchor: { fiber, parent: owner.context },
       hidden: false,
       capture: owner.capture,
       probe,
@@ -672,7 +700,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       installCommitHook(this.root);
       this.placed = !insideHidden(fiber);
       if (bridge && this.capture === emptyCapture) {
-        this.capture = captureAbove(fiber, anchorContext);
+        this.capture = captureAbove(fiber, anchorContext, true);
         this.readable = this.capture.readable;
       }
     }
@@ -706,6 +734,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       this.anchor = this.context;
       const fiber = fiberOf(this);
       const path = pathOf(fiber, this.anchor);
+      const anchor = { fiber, parent: this.anchor };
       if (isDevEnv && !warnedRoots) warnIfRootsMix(path);
       const probe = this.probe;
       const claimed =
@@ -716,6 +745,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
         claimed.path = path;
         claimed.below = null;
         claimed.children = this.props.children;
+        claimed.anchor = anchor;
         claimed.capture = this.capture;
         claimed.listeners = this.statusListeners;
         claimed.element = null;
@@ -729,6 +759,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           path,
           below: null,
           children: this.props.children,
+          anchor,
           hidden: false,
           capture: this.capture,
           probe: null,
@@ -770,6 +801,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
         if (!items.has(item.key)) items.set(item.key, item);
         item.hidden = false;
         item.element = null;
+        this.syncAnchor(item);
         emit();
       } else {
         this.register();
@@ -777,20 +809,27 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       if (bridge) join(this, this.capture.path);
     }
 
+    /** Re-resolves the item's path and content anchor after an anchor
+     * change. True when the anchor changed. */
+    syncAnchor(item: Item) {
+      if (this.anchor === this.context) return false;
+      this.anchor = this.context;
+      const fiber = fiberOf(this);
+      item.path = pathOf(fiber, this.anchor);
+      trackPath(item.path);
+      item.anchor = { fiber, parent: this.anchor };
+      if (bridge) item.element = null;
+      generation++;
+      return true;
+    }
+
     componentDidUpdate(prev: FiberTunnelInProps) {
       const item = this.item;
       if (!item) return;
-      let changed = false;
+      let changed = this.syncAnchor(item);
       if (prev.children !== this.props.children) {
         item.children = this.props.children;
         item.element = null;
-        changed = true;
-      }
-      if (this.anchor !== this.context) {
-        this.anchor = this.context;
-        item.path = pathOf(fiberOf(this), this.anchor);
-        trackPath(item.path);
-        generation++;
         changed = true;
       }
       if (changed) emit();
@@ -864,7 +903,8 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           hidden={item.hidden}
           activity={activity}
           probe={item.probe}
-          forwardErrors={forwardErrors}
+          anchor={item.anchor}
+          isolate={isolate}
         >
           {item.children}
         </ItemView>
@@ -881,58 +921,132 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     return element;
   }
 
-  /** Group elements by key; reused while their child elements match. */
+  /** A source a Group renders for an item. */
+  interface GroupStep {
+    source: Source;
+    /** The Out sits under the source's own provider. */
+    native: boolean;
+  }
+
+  /** Groups wrapping `item`: its capture, less sources the Out reads
+   * natively, unless a Group above provides their context. */
+  function groupPath(
+    item: Item,
+    native: ReadonlyMap<unknown, Fiber>,
+  ): GroupStep[] {
+    const provided = new Set<unknown>();
+    const steps: GroupStep[] = [];
+    for (const source of item.capture.path) {
+      const provider = native.get(source.context);
+      const isNative = provider !== undefined && sourceAt(provider) === source;
+      if (isNative && !provided.has(source.context)) continue;
+      provided.add(source.context);
+      steps.push({ source, native: isNative });
+    }
+    return steps;
+  }
+
+  /** Props of {@link OutGroups}. */
+  interface OutGroupsProps {
+    out: OutState;
+    sorted: readonly Item[];
+    activity: boolean;
+  }
+
+  /** A bridged Out's items in their Groups. Reads native sources' values:
+   * their Groups update in the render that changes them. */
+  function OutGroups({ out, sorted, activity }: OutGroupsProps) {
+    "use no memo";
+    const paths = sorted.map((item) => groupPath(item, out.native));
+    const values = new Map<Source, unknown>();
+    for (const path of paths) {
+      for (const { source, native } of path) {
+        if (native && !values.has(source)) {
+          values.set(source, use(source.context));
+        }
+      }
+    }
+    return groupedElements(sorted, paths, activity, values);
+  }
+
+  /** Group elements by their path of keys; reused while their value and
+   * child elements match. */
   let groupCache = new Map<
     string,
-    { children: ReactElement[]; element: ReactElement }
+    { children: ReactElement[]; value: unknown; element: ReactElement }
   >();
 
-  /** Nests items by provider path; siblings keep first-item order. */
+  /** Nests items by group path in sorted order. Consecutive items share a
+   * source's Group; interleaved items split it into runs. `values`: native
+   * sources' values. */
   function groupedElements(
     sorted: readonly Item[],
+    paths: readonly GroupStep[][],
     activity: boolean,
+    values: ReadonlyMap<Source, unknown>,
   ): ReactElement[] {
     interface Node {
       source: Source | null;
+      /** React key: `g{id}`, then `g{id}:{first item key}` per later run. */
+      key: string;
       children: (Node | Item)[];
-      bySource: Map<Source, Node>;
+      /** Runs per source among the children. */
+      runs: Map<Source, number>;
     }
-    const top: Node = { source: null, children: [], bySource: new Map() };
-    for (const item of sorted) {
+    const top: Node = { source: null, key: "", children: [], runs: new Map() };
+    sorted.forEach((item, i) => {
       let node = top;
-      for (const source of item.capture.path) {
-        let child = node.bySource.get(source);
-        if (!child) {
-          child = { source, children: [], bySource: new Map() };
-          node.bySource.set(source, child);
-          node.children.push(child);
+      for (const { source } of paths[i]) {
+        const last = node.children[node.children.length - 1];
+        if (last && "runs" in last && last.source === source) {
+          node = last;
+          continue;
         }
+        const run = node.runs.get(source) ?? 0;
+        node.runs.set(source, run + 1);
+        if (run > 0 && isDevEnv && !warnedSplit) {
+          warnedSplit = true;
+          console.warn(splitGroupsWarning);
+        }
+        const child: Node = {
+          source,
+          key: run ? `g${source.id}:${item.key}` : `g${source.id}`,
+          children: [],
+          runs: new Map(),
+        };
+        node.children.push(child);
         node = child;
       }
       node.children.push(item);
-    }
+    });
     const nextCache: typeof groupCache = new Map();
-    const render = (node: Node): ReactElement[] =>
+    const render = (node: Node, at: string): ReactElement[] =>
       node.children.map((child) => {
-        if (!("bySource" in child)) return elementOf(child, activity);
+        if (!("runs" in child)) return elementOf(child, activity);
         const source = child.source!;
-        const key = `g${source.id}`;
-        const elements = render(child);
-        const cached = groupCache.get(key);
+        const path = `${at}/${child.key}`;
+        const elements = render(child, path);
+        const value = values.get(source);
+        const cached = groupCache.get(path);
         const element =
           cached &&
+          Object.is(cached.value, value) &&
           cached.children.length === elements.length &&
           cached.children.every((e, i) => e === elements[i]) ? (
             cached.element
+          ) : values.has(source) ? (
+            <NativeGroup key={child.key} source={source} value={value}>
+              {elements}
+            </NativeGroup>
           ) : (
-            <Group key={key} source={source} core={core}>
+            <Group key={child.key} source={source} core={core}>
               {elements}
             </Group>
           );
-        nextCache.set(key, { children: elements, element });
+        nextCache.set(path, { children: elements, value, element });
         return element;
       });
-    const elements = render(top);
+    const elements = render(top, "");
     groupCache = nextCache;
     return elements;
   }
@@ -964,6 +1078,8 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     root: FiberRootLike | null;
     /** The root's reconciler renders Activity. */
     activity: boolean;
+    /** Nearest native provider of each context above the Out. */
+    native: ReadonlyMap<unknown, Fiber>;
     checks: OutChecks | null;
   }
 
@@ -978,9 +1094,10 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       if (!out.root) {
         const fiber = renderingFiberOf(this);
         const top = fiber && topOf(fiber);
-        if (top?.tag === HostRootTag) {
+        if (fiber && top?.tag === HostRootTag) {
           out.root = top.stateNode as FiberRootLike;
           out.activity = rendersActivity(out.root);
+          out.native = nativeProvidersAbove(fiber);
         }
       }
       return this.props.render(out.activity);
@@ -1001,6 +1118,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     const [out] = useState<OutState>(() => ({
       root: null,
       activity: true,
+      native: new Map(),
       checks: bridge ? createOutChecks(() => setChecked((n) => n + 1)) : null,
     }));
 
@@ -1038,9 +1156,16 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
         out={out}
         render={(activity) => (
           <>
-            {bridge
-              ? groupedElements(sorted, activity)
-              : sorted.map((item) => elementOf(item, activity))}
+            {bridge ? (
+              <OutGroups
+                key="groups"
+                out={out}
+                sorted={sorted}
+                activity={activity}
+              />
+            ) : (
+              sorted.map((item) => elementOf(item, activity))
+            )}
             {checks && !checks.microtask.done && (
               <MicrotaskCheckView key="microtask" check={checks.microtask} />
             )}

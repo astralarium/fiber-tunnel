@@ -50,8 +50,11 @@ class Anchor extends Component<FiberAnchorProps> {
 
 /**
  * Places a nested React root's tunnel content at this point in tree order.
- * One nested root per anchor; it must bridge context (r3f's `<Canvas>`
- * does; otherwise use its-fine's `useContextBridge`).
+ * One nested root per anchor; it must bridge context. {@link ContextBridge}
+ * shares the outer root's providers; r3f's `<Canvas>` copies them.
+ *
+ * A root whose Ins all sit inside bridged content needs no anchor: that
+ * content orders at its In.
  *
  * Hiding it (Suspense, Activity) keeps the root's content in the Out.
  */

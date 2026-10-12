@@ -45,6 +45,10 @@ import {
   priorWorkCompleted,
 } from "./fiber";
 import { FiberAnchor } from "./fiber-anchor";
+import {
+  FiberAnchorContext,
+  type FiberAnchorValue,
+} from "./fiber-anchor-context";
 import { type FiberTunnel, fiberTunnel } from "./fiber-tunnel";
 import { SourceReader } from "./sources";
 import {
@@ -124,7 +128,7 @@ function ChildRootInner({ children }: { children: ReactNode }) {
 }
 
 describe("fiberTunnel", () => {
-  test("refresh re-reads order after a keyed reorder of memoized Ins while move detection is off", () => {
+  test("refresh re-reads order after a keyed reorder of memoized Ins while move detection is off", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = fiberTunnel();
     const MemoIn = memo(function MemoIn({ label }: { label: string }) {
@@ -157,22 +161,22 @@ describe("fiberTunnel", () => {
       value: (fiberRoot as { current: unknown }).current,
     });
 
-    act(() => root.render(<App order={["A", "B"]} />));
+    await act(async () => root.render(<App order={["A", "B"]} />));
     expect(consoleWarn).toHaveBeenCalledWith(
       expect.stringContaining("move detection is off"),
     );
-    act(() => root.render(<App order={["B", "A"]} />));
+    await act(async () => root.render(<App order={["B", "A"]} />));
     // Memoized Ins skip the move; the Out reads the previous tree.
     expect(buttonLabels()).toEqual(["A", "B"]);
 
-    act(() => t.refresh());
+    await act(async () => t.refresh());
     expect(buttonLabels()).toEqual(["B", "A"]);
     act(() => root.unmount());
     container.remove();
     consoleWarn.mockRestore();
   });
 
-  test("removes an In's content when the In unmounts", () => {
+  test("removes an In's content when the In unmounts", async () => {
     const t = fiberTunnel();
     function App({ showFirst }: { showFirst: boolean }) {
       return (
@@ -191,8 +195,9 @@ describe("fiberTunnel", () => {
     }
 
     const { rerender } = render(<App showFirst={true} />);
+    await flush();
     expect(buttonLabels()).toEqual(["First", "Second"]);
-    rerender(<App showFirst={false} />);
+    await act(async () => rerender(<App showFirst={false} />));
     expect(buttonLabels()).toEqual(["Second"]);
   });
 
@@ -230,7 +235,7 @@ describe("fiberTunnel", () => {
     expect(screen.getByRole("button", { name: "First" })).toBe(first);
   });
 
-  test("keeps tunneled content's state and DOM when its In re-renders", () => {
+  test("keeps tunneled content's state and DOM when its In re-renders", async () => {
     const t = fiberTunnel();
     function Counter() {
       const [count, setCount] = useState(0);
@@ -249,9 +254,10 @@ describe("fiberTunnel", () => {
     }
 
     const { rerender } = render(<App label="One" />);
+    await flush();
     const button = screen.getByRole("button");
     fireEvent.click(button);
-    rerender(<App label="Two" />);
+    await act(async () => rerender(<App label="Two" />));
 
     expect(screen.getByText("Two")).toBeInTheDocument();
     expect(screen.getByRole("button")).toBe(button);
@@ -260,7 +266,7 @@ describe("fiberTunnel", () => {
 });
 
 describe("tunnel ordering", () => {
-  test("keeps item order when a tunneled item re-renders", () => {
+  test("keeps item order when a tunneled item re-renders", async () => {
     const t = fiberTunnel();
     function CounterIn({ label }: { label: string }) {
       const [count, setCount] = useState(0);
@@ -281,14 +287,17 @@ describe("tunnel ordering", () => {
         <t.Out />
       </>,
     );
+    await flush();
 
     fireEvent.click(screen.getByRole("button", { name: "First 0" }));
+    await flush();
     fireEvent.click(screen.getByRole("button", { name: "Second 0" }));
+    await flush();
 
     expect(buttonLabels()).toEqual(["First 1", "Second 1", "Third 0"]);
   });
 
-  test("keeps item order when items mount later", () => {
+  test("keeps item order when items mount later", async () => {
     const t = fiberTunnel();
     function App({ showFirst }: { showFirst: boolean }) {
       return (
@@ -307,9 +316,7 @@ describe("tunnel ordering", () => {
     }
 
     const { rerender } = render(<App showFirst={false} />);
-    act(() => {
-      rerender(<App showFirst={true} />);
-    });
+    await act(async () => rerender(<App showFirst={true} />));
 
     expect(buttonLabels()).toEqual(["First", "Second"]);
   });
@@ -419,7 +426,7 @@ describe("Out", () => {
     expect(button).toHaveTextContent("1");
   });
 
-  test("keeps content state and DOM while Activity hides the Out", () => {
+  test("keeps content state and DOM while Activity hides the Out", async () => {
     const t = fiberTunnel();
     function Counter() {
       const [count, setCount] = useState(0);
@@ -439,10 +446,11 @@ describe("Out", () => {
     }
 
     const { rerender } = render(<App mode="visible" />);
+    await flush();
     const button = screen.getByRole("button");
     fireEvent.click(button);
-    rerender(<App mode="hidden" />);
-    rerender(<App mode="visible" />);
+    await act(async () => rerender(<App mode="hidden" />));
+    await act(async () => rerender(<App mode="visible" />));
 
     expect(screen.getByRole("button")).toBe(button);
     expect(button).toHaveTextContent("1");
@@ -479,7 +487,7 @@ describe("Out", () => {
 });
 
 describe("FiberAnchor", () => {
-  test("orders content within one anchored child root", () => {
+  test("orders content within one anchored child root", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = fiberTunnel();
     function App({ showFirst }: { showFirst: boolean }) {
@@ -503,7 +511,7 @@ describe("FiberAnchor", () => {
     }
 
     const { rerender } = render(<App showFirst={false} />);
-    rerender(<App showFirst={true} />);
+    await act(async () => rerender(<App showFirst={true} />));
     expect(buttonLabels()).toEqual(["First", "Second"]);
     expect(consoleWarn).not.toHaveBeenCalled();
     consoleWarn.mockRestore();
@@ -541,19 +549,19 @@ describe("FiberAnchor", () => {
     render(
       <>
         <FiberAnchor>
-          <ChildRoot>
+          <NestedRoot>
             <t.In>
               <button>B1</button>
             </t.In>
-            <ChildRoot>
+            <NestedRoot>
               <t.In>
                 <button>C</button>
               </t.In>
-            </ChildRoot>
+            </NestedRoot>
             <t.In>
               <button>B2</button>
             </t.In>
-          </ChildRoot>
+          </NestedRoot>
         </FiberAnchor>
         <t.Out />
       </>,
@@ -619,7 +627,7 @@ describe("FiberAnchor", () => {
     consoleWarn.mockRestore();
   });
 
-  test("chains nested anchors across roots", () => {
+  test("chains nested anchors across roots", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = fiberTunnel();
     render(
@@ -628,21 +636,21 @@ describe("FiberAnchor", () => {
           <button>A</button>
         </t.In>
         <FiberAnchor>
-          <ChildRoot>
+          <NestedRoot>
             <t.In>
               <button>B1</button>
             </t.In>
             <FiberAnchor>
-              <ChildRoot>
+              <NestedRoot>
                 <t.In>
                   <button>C</button>
                 </t.In>
-              </ChildRoot>
+              </NestedRoot>
             </FiberAnchor>
             <t.In>
               <button>B2</button>
             </t.In>
-          </ChildRoot>
+          </NestedRoot>
         </FiberAnchor>
         <t.In>
           <button>D</button>
@@ -650,6 +658,7 @@ describe("FiberAnchor", () => {
         <t.Out />
       </>,
     );
+    await flush();
 
     expect(buttonLabels()).toEqual(["A", "B1", "C", "B2", "D"]);
     expect(consoleWarn).not.toHaveBeenCalled();
@@ -705,7 +714,7 @@ describe("multiple Outs", () => {
     consoleError.mockRestore();
   });
 
-  test("dev errors once per Out that mounts beside another", () => {
+  test("dev errors once per Out that mounts beside another", async () => {
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
@@ -724,11 +733,12 @@ describe("multiple Outs", () => {
     }
 
     const { rerender } = render(<App second={false} third={false} />);
+    await flush();
     expect(consoleError).not.toHaveBeenCalled();
-    rerender(<App second={true} third={false} />);
+    await act(async () => rerender(<App second={true} third={false} />));
     expect(consoleError).toHaveBeenCalledTimes(1);
-    rerender(<App second={false} third={false} />);
-    rerender(<App second={false} third={true} />);
+    await act(async () => rerender(<App second={false} third={false} />));
+    await act(async () => rerender(<App second={false} third={true} />));
     expect(consoleError).toHaveBeenCalledTimes(2);
     consoleError.mockRestore();
   });
@@ -902,9 +912,20 @@ class Boundary extends Component<
   }
 }
 
+/** Records the anchor each `Grab` renders under, by name. */
+function anchorGrabber() {
+  const anchors = new Map<string, FiberAnchorValue>();
+  function Grab({ name }: { name: string }) {
+    const anchor = use(FiberAnchorContext);
+    if (anchor) anchors.set(name, anchor);
+    return null;
+  }
+  return { anchors, Grab };
+}
+
 describe("bridge", () => {
   test("renders content with context provided above its In", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const out = await mountDomRoot(<t.Out />);
     render(
       <Theme value="dark">
@@ -918,7 +939,7 @@ describe("bridge", () => {
   });
 
   test("re-renders only consumers when a bridged value changes", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const consumerRendered = vi.fn();
     const otherRendered = vi.fn();
     function Consumer() {
@@ -950,8 +971,8 @@ describe("bridge", () => {
   });
 
   test("re-renders one reader per provider when a value changes", async () => {
-    const t = fiberTunnel({ bridge: true });
-    const u = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
+    const u = fiberTunnel();
     const control = createRef<SetTheme>();
     const out = await mountDomRoot(
       <>
@@ -997,7 +1018,7 @@ describe("bridge", () => {
   });
 
   test("renders content's first render with the provider's current value", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const seen: string[] = [];
     function Recorder({ name }: { name: string }) {
       const theme = use(Theme);
@@ -1030,7 +1051,7 @@ describe("bridge", () => {
   });
 
   test("renders one provider instance for Ins under the same provider", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const out = await mountDomRoot(<t.Out />);
     render(
       <>
@@ -1058,7 +1079,7 @@ describe("bridge", () => {
   });
 
   test("keeps content state and DOM when another In joins or leaves its provider", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     function App({ showB }: { showB: boolean }) {
       return (
         <Theme value="dark">
@@ -1093,7 +1114,7 @@ describe("bridge", () => {
   });
 
   test("keeps an unchanged provider from re-rendering when an unrelated In mounts", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const rendered = vi.fn();
     function Counted() {
       rendered();
@@ -1138,7 +1159,7 @@ describe("bridge", () => {
   });
 
   test("unmounts a provider when its last In unmounts", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     function App({ names }: { names: string[] }) {
       return (
         <Theme value="dark">
@@ -1170,7 +1191,7 @@ describe("bridge", () => {
   });
 
   test("orders content in fiber order when an inner provider shadows an outer one", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const out = await mountDomRoot(<t.Out />);
     render(
       <Theme value="outer">
@@ -1192,7 +1213,7 @@ describe("bridge", () => {
   });
 
   test("hands reading to the next In when the owner unmounts", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const control = createRef<SetTheme>();
     function App({ showA }: { showA: boolean }) {
       return (
@@ -1220,7 +1241,7 @@ describe("bridge", () => {
   });
 
   test("hands reading to the next In when Activity hides the owner", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const control = createRef<SetTheme>();
     function App({ mode }: { mode: "visible" | "hidden" }) {
       return (
@@ -1252,7 +1273,7 @@ describe("bridge", () => {
   });
 
   test("shares sources across nested roots through a bridge", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const control = createRef<SetTheme>();
     const out = await mountDomRoot(<t.Out />);
     render(
@@ -1279,7 +1300,7 @@ describe("bridge", () => {
   });
 
   test("applies StrictMode to content whose In renders under StrictMode", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const rendered = vi.fn();
     const effects = vi.fn();
     function Rendered({ name }: { name: string }) {
@@ -1310,7 +1331,7 @@ describe("bridge", () => {
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     function Throws(): ReactNode {
       throw new Error("boom");
     }
@@ -1333,9 +1354,9 @@ describe("bridge", () => {
     consoleError.mockRestore();
   });
 
-  test("rethrows a content error at the boundary above the Out when errors stay at the Out", async () => {
+  test("rethrows an isolated content error at the boundary above the Out", async () => {
     const consoleError = spyError();
-    const t = fiberTunnel({ bridge: true, errors: "out" });
+    const t = fiberTunnel({ isolate: true });
     function Throws(): ReactNode {
       throw new Error("boom");
     }
@@ -1359,7 +1380,7 @@ describe("bridge", () => {
 
   test("keeps the In's siblings mounted when content errors at the Out", async () => {
     const consoleError = spyError();
-    const t = fiberTunnel({ bridge: true, errors: "out" });
+    const t = fiberTunnel({ isolate: true });
     function Throws(): ReactNode {
       throw new Error("boom");
     }
@@ -1384,7 +1405,7 @@ describe("bridge", () => {
 
   test("recovers content when the boundary above the Out resets", async () => {
     const consoleError = spyError();
-    const t = fiberTunnel({ bridge: true, errors: "out" });
+    const t = fiberTunnel({ isolate: true });
     let broken = true;
     function Flaky() {
       if (broken) throw new Error("boom");
@@ -1416,10 +1437,63 @@ describe("bridge", () => {
     consoleError.mockRestore();
   });
 
+  test("keeps the In's siblings visible while isolated content loads", async () => {
+    const t = fiberTunnel({ isolate: true });
+    const resource = createResource<string>();
+    function Loader() {
+      resource.useData("x");
+      return <button>Loaded</button>;
+    }
+    const out = await mountDomRoot(<t.Out />);
+    const { container } = await mountDomRoot(
+      <Suspense fallback={<p>loading</p>}>
+        <t.In>
+          <Loader />
+        </t.In>
+        <button>Sibling</button>
+      </Suspense>,
+      "primary",
+    );
+    await flush();
+    expect(labelsIn(container)).toEqual(["Sibling"]);
+    expect(screen.queryByText("loading")).toBeNull();
+    expect(labelsIn(out.container)).toEqual([]);
+
+    await act(async () => resource.resolve("x"));
+    expect(labelsIn(out.container)).toEqual(["Loaded"]);
+  });
+
+  test("hides isolated content while its In's boundary shows a fallback", async () => {
+    const t = fiberTunnel({ isolate: true });
+    const gate = createGate();
+    const app = (suspended: boolean) => (
+      <Suspense fallback={<p>loading</p>}>
+        <gate.Gate suspended={suspended} />
+        <t.In>
+          <Counter name="label" />
+        </t.In>
+      </Suspense>
+    );
+    const out = await mountDomRoot(<t.Out />);
+    const primary = await mountDomRoot(app(false), "primary");
+    fireEvent.click(within(out.container).getByRole("button"));
+    await flush();
+    expect(labelsIn(out.container)).toEqual(["label 1"]);
+
+    await act(async () => primary.root.render(app(true)));
+    expect(labelsIn(out.container)).toEqual([]);
+
+    await act(async () => {
+      gate.resolve();
+      await gate.promise;
+    });
+    expect(labelsIn(out.container)).toEqual(["label 1"]);
+  });
+
   test("surfaces a nested bridged tunnel's error at the outer Out's boundary", async () => {
     const consoleError = spyError();
-    const outer = fiberTunnel({ bridge: true, errors: "out" });
-    const inner = fiberTunnel({ bridge: true, errors: "out" });
+    const outer = fiberTunnel({ isolate: true });
+    const inner = fiberTunnel({ isolate: true });
     function Throws(): ReactNode {
       throw new Error("boom");
     }
@@ -1445,8 +1519,549 @@ describe("bridge", () => {
     consoleError.mockRestore();
   });
 
+  test("orders a nested tunnel's In inside bridged content at the bridged In", async () => {
+    const warnings = spyWarn();
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const { container } = render(
+      <>
+        <outer.Out />
+        <inner.In>
+          <button>A</button>
+        </inner.In>
+        <outer.In>
+          <inner.In>
+            <button>B</button>
+          </inner.In>
+        </outer.In>
+        <inner.In>
+          <button>C</button>
+        </inner.In>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["A", "B", "C"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("reorders nested content when its bridged In moves", async () => {
+    const warnings = spyWarn();
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const Card = memo(function Card({ name }: { name: string }) {
+      return (
+        <outer.In>
+          <inner.In>
+            <button>{name}</button>
+          </inner.In>
+        </outer.In>
+      );
+    });
+    const Direct = memo(function Direct({ name }: { name: string }) {
+      return (
+        <inner.In>
+          <button>{name}</button>
+        </inner.In>
+      );
+    });
+    function App({ order }: { order: string[] }) {
+      return (
+        <>
+          <outer.Out />
+          {order.map((name) =>
+            name === "M" ? (
+              <Direct key={name} name={name} />
+            ) : (
+              <Card key={name} name={name} />
+            ),
+          )}
+          <LabeledOut tunnel={inner} name="inner" />
+        </>
+      );
+    }
+    const { container, rerender } = render(<App order={["X", "M", "Y"]} />);
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["X", "M", "Y"]);
+
+    await act(async () => rerender(<App order={["Y", "M", "X"]} />));
+    expect(labelsIn(innerOut)).toEqual(["Y", "M", "X"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("orders nested content through bridged Ins in three roots", async () => {
+    const warnings = spyWarn();
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const out = await mountHostRoot(<outer.Out />);
+    const { container } = render(
+      <>
+        <inner.In>
+          <button>A</button>
+        </inner.In>
+        <FiberAnchor>
+          <NestedRoot>
+            <inner.In>
+              <button>B1</button>
+            </inner.In>
+            <outer.In>
+              <inner.In>
+                <button>B2</button>
+              </inner.In>
+              <button>outer</button>
+            </outer.In>
+            <inner.In>
+              <button>B3</button>
+            </inner.In>
+          </NestedRoot>
+        </FiberAnchor>
+        <inner.In>
+          <button>C</button>
+        </inner.In>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await flush();
+    await flush();
+    expect(out.buttons()).toEqual(["outer"]);
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["A", "B1", "B2", "B3", "C"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("reorders nested content when its bridged In's anchor changes", async () => {
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const { anchors, Grab } = anchorGrabber();
+    const { container } = render(
+      <>
+        <FiberAnchor>
+          <Grab name="P" />
+        </FiberAnchor>
+        <inner.In>
+          <button>M</button>
+        </inner.In>
+        <FiberAnchor>
+          <Grab name="Q" />
+        </FiberAnchor>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await mountDomRoot(<outer.Out />);
+    // Stable children: only the anchor changes.
+    const content = (
+      <inner.In>
+        <button>B</button>
+      </inner.In>
+    );
+    const scene = (name: string) => (
+      <FiberAnchorContext value={anchors.get(name)!}>
+        <outer.In>{content}</outer.In>
+      </FiberAnchorContext>
+    );
+    const { root } = await mountDomRoot(scene("P"), "scene");
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["B", "M"]);
+
+    await act(async () => root.render(scene("Q")));
+    await flush();
+    expect(labelsIn(innerOut)).toEqual(["M", "B"]);
+  });
+
+  test("reorders nested content when its bridged In's anchor changes while hidden", async () => {
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const { anchors, Grab } = anchorGrabber();
+    const { container } = render(
+      <>
+        <FiberAnchor>
+          <Grab name="P" />
+        </FiberAnchor>
+        <inner.In>
+          <button>M</button>
+        </inner.In>
+        <FiberAnchor>
+          <Grab name="Q" />
+        </FiberAnchor>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await mountDomRoot(<outer.Out />);
+    const content = (
+      <inner.In>
+        <button>B</button>
+      </inner.In>
+    );
+    const scene = (name: string, mode: "visible" | "hidden") => (
+      <FiberAnchorContext value={anchors.get(name)!}>
+        <Activity mode={mode}>
+          <outer.In>{content}</outer.In>
+        </Activity>
+      </FiberAnchorContext>
+    );
+    const { root } = await mountDomRoot(scene("P", "visible"), "scene");
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["B", "M"]);
+
+    await act(async () => root.render(scene("P", "hidden")));
+    await act(async () => root.render(scene("Q", "hidden")));
+    await act(async () => root.render(scene("Q", "visible")));
+    await flush();
+    expect(labelsIn(innerOut)).toEqual(["M", "B"]);
+  });
+
+  test("renders a consumer once when a provider above both the In and the Out changes", async () => {
+    const t = fiberTunnel();
+    const control = createRef<SetTheme>();
+    const renders: string[] = [];
+    const commits: string[] = [];
+    function Consumer() {
+      const theme = use(Theme);
+      renders.push(theme);
+      useLayoutEffect(() => void commits.push(theme));
+      return <button>{theme}</button>;
+    }
+    const content = <Consumer />;
+    render(
+      <ThemeHost initial="dark" control={control}>
+        <t.In>{content}</t.In>
+        <LabeledOut tunnel={t} name="out" />
+      </ThemeHost>,
+    );
+    await flush();
+    renders.length = 0;
+    commits.length = 0;
+
+    await act(async () => control.current!("light"));
+    expect(renders).toEqual(["light"]);
+    expect(commits).toEqual(["light"]);
+  });
+
+  test("renders the In's nearer provider over a provider the Out shares", async () => {
+    const t = fiberTunnel();
+    const control = createRef<SetTheme>();
+    const { container } = render(
+      <ThemeHost initial="dark" control={control}>
+        <Theme value="inner">
+          <t.In>
+            <ThemeLabel name="A" />
+          </t.In>
+        </Theme>
+        <LabeledOut tunnel={t} name="out" />
+      </ThemeHost>,
+    );
+    await flush();
+    const out = container.querySelector<HTMLElement>(".out")!;
+    expect(labelsIn(out)).toEqual(["A inner"]);
+
+    await act(async () => control.current!("light"));
+    expect(labelsIn(out)).toEqual(["A inner"]);
+  });
+
+  test("orders nested content with Ins outside it when the Out's root re-provides context", async () => {
+    const warnings = spyWarn();
+    const outer = fiberTunnel();
+    const inner = fiberTunnel();
+    const { container } = render(
+      <>
+        <ThemeHost initial="dark">
+          <inner.In>
+            <ThemeLabel name="A" />
+          </inner.In>
+          <outer.In>
+            <inner.In>
+              <ThemeLabel name="B" />
+            </inner.In>
+          </outer.In>
+          <inner.In>
+            <ThemeLabel name="C" />
+          </inner.In>
+          <ChildRoot>
+            <outer.Out />
+          </ChildRoot>
+        </ThemeHost>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await flush();
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["A dark", "B dark", "C dark"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("keeps tree order when Ins under re-provided contexts interleave", async () => {
+    spyWarn();
+    const t = fiberTunnel();
+    const { container } = render(
+      <ThemeHost initial="dark">
+        <t.In>
+          <ThemeLabel name="A" />
+        </t.In>
+        <FiberAnchor>
+          <ChildRoot>
+            <t.In>
+              <ThemeLabel name="B1" />
+            </t.In>
+            <FiberAnchor>
+              <ChildRoot>
+                <t.In>
+                  <ThemeLabel name="C" />
+                </t.In>
+              </ChildRoot>
+            </FiberAnchor>
+            <t.In>
+              <ThemeLabel name="B2" />
+            </t.In>
+          </ChildRoot>
+        </FiberAnchor>
+        <t.In>
+          <ThemeLabel name="D" />
+        </t.In>
+        <LabeledOut tunnel={t} name="out" />
+      </ThemeHost>,
+    );
+    await flush();
+    await flush();
+    const out = container.querySelector<HTMLElement>(".out")!;
+    expect(labelsIn(out)).toEqual([
+      "A dark",
+      "B1 dark",
+      "C dark",
+      "B2 dark",
+      "D dark",
+    ]);
+  });
+
+  test("warns once when Ins under re-provided contexts interleave", async () => {
+    const warnings = spyWarn();
+    const t = fiberTunnel();
+    function App({ label }: { label: string }) {
+      return (
+        <>
+          <ThemeHost initial="dark">
+            <t.In>
+              <ThemeLabel name="A" />
+            </t.In>
+            <FiberAnchor>
+              <ChildRoot>
+                <t.In>
+                  <ThemeLabel name={label} />
+                </t.In>
+              </ChildRoot>
+            </FiberAnchor>
+            <t.In>
+              <ThemeLabel name="C" />
+            </t.In>
+          </ThemeHost>
+          <LabeledOut tunnel={t} name="out" />
+        </>
+      );
+    }
+    const { rerender } = render(<App label="B" />);
+    await flush();
+    await flush();
+    await act(async () => rerender(<App label="B2" />));
+    await flush();
+    const split = warnings().filter((w) => w.includes("split"));
+    expect(split).toHaveLength(1);
+  });
+
+  test("renders the nearest provider when nested providers of one context sit above both the In and the Out", async () => {
+    const t = fiberTunnel();
+    const control = createRef<SetTheme>();
+    const { container } = render(
+      <ThemeHost initial="outer">
+        <ThemeHost initial="dark" control={control}>
+          <t.In>
+            <ThemeLabel name="A" />
+          </t.In>
+          <LabeledOut tunnel={t} name="out" />
+        </ThemeHost>
+      </ThemeHost>,
+    );
+    await flush();
+    const out = container.querySelector<HTMLElement>(".out")!;
+    expect(labelsIn(out)).toEqual(["A dark"]);
+
+    await act(async () => control.current!("light"));
+    expect(labelsIn(out)).toEqual(["A light"]);
+  });
+
+  test("renders a consumer once when nested providers of one context above both the In and the Out change", async () => {
+    const t = fiberTunnel();
+    const control = createRef<SetTheme>();
+    const renders: string[] = [];
+    const commits: string[] = [];
+    function Consumer() {
+      const theme = use(Theme);
+      renders.push(theme);
+      useLayoutEffect(() => void commits.push(theme));
+      return <button>{theme}</button>;
+    }
+    const content = <Consumer />;
+    render(
+      <ThemeHost initial="outer">
+        <ThemeHost initial="dark" control={control}>
+          <t.In>{content}</t.In>
+          <LabeledOut tunnel={t} name="out" />
+        </ThemeHost>
+      </ThemeHost>,
+    );
+    await flush();
+    renders.length = 0;
+    commits.length = 0;
+
+    await act(async () => control.current!("light"));
+    expect(renders).toEqual(["light"]);
+    expect(commits).toEqual(["light"]);
+  });
+
+  test("carries contexts above the Out into a nested root inside content", async () => {
+    const t = fiberTunnel();
+    await mountDomRoot(
+      <Theme value="out">
+        <t.Out />
+      </Theme>,
+    );
+    render(
+      <t.In>
+        <ThemeLabel name="direct" />
+        <NestedRoot>
+          <ThemeLabel name="nested" />
+        </NestedRoot>
+      </t.In>,
+    );
+    await flush();
+    await flush();
+    expect(buttonLabels().sort()).toEqual(["direct out", "nested out"]);
+  });
+
+  test("keeps one provider group when an In unmounts as another mounts", async () => {
+    const warnings = spyWarn();
+    const t = fiberTunnel();
+    let setShow!: (show: boolean) => void;
+    function App() {
+      const [show, set] = useState(true);
+      useLayoutEffect(() => {
+        setShow = set;
+      }, [set]);
+      return (
+        <>
+          <Theme value="p">
+            {show && (
+              <t.In>
+                <button>A</button>
+              </t.In>
+            )}
+            <t.In>
+              <button>B</button>
+            </t.In>
+          </Theme>
+          <t.In>
+            <button>X</button>
+          </t.In>
+          {!show && (
+            <t.In>
+              <button>N</button>
+            </t.In>
+          )}
+        </>
+      );
+    }
+    const out = await mountDomRoot(<t.Out />);
+    render(<App />);
+    await flush();
+    expect(labelsIn(out.container)).toEqual(["A", "B", "X"]);
+
+    await act(async () => flushSync(() => setShow(false)));
+    await flush();
+    expect(labelsIn(out.container)).toEqual(["B", "X", "N"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("keeps a later run's content state when an earlier run splits", async () => {
+    spyWarn();
+    const t = fiberTunnel();
+    function App({ first }: { first: boolean }) {
+      return (
+        <>
+          <ThemeHost initial="dark">
+            <t.In>
+              <Counter name="A" />
+            </t.In>
+            <FiberAnchor>
+              <ChildRoot>
+                {first && (
+                  <t.In>
+                    <Counter name="R1" />
+                  </t.In>
+                )}
+              </ChildRoot>
+            </FiberAnchor>
+            <t.In>
+              <Counter name="C" />
+            </t.In>
+            <FiberAnchor>
+              <ChildRoot>
+                <t.In>
+                  <Counter name="R2" />
+                </t.In>
+              </ChildRoot>
+            </FiberAnchor>
+            <t.In>
+              <Counter name="E" />
+            </t.In>
+          </ThemeHost>
+          <LabeledOut tunnel={t} name="out" />
+        </>
+      );
+    }
+    const { container, rerender } = render(<App first={false} />);
+    await flush();
+    await flush();
+    const out = container.querySelector<HTMLElement>(".out")!;
+    expect(labelsIn(out)).toEqual(["A 0", "C 0", "R2 0", "E 0"]);
+    fireEvent.click(within(out).getByRole("button", { name: "A 0" }));
+    fireEvent.click(within(out).getByRole("button", { name: "E 0" }));
+    await flush();
+
+    await act(async () => rerender(<App first={true} />));
+    await flush();
+    expect(labelsIn(out)).toEqual(["A 1", "R1 0", "C 0", "R2 0", "E 1"]);
+  });
+
+  test("keeps unbridged content's nested Ins at the Out", async () => {
+    const outer = fiberTunnel({ bridge: false });
+    const inner = fiberTunnel();
+    const { container } = render(
+      <>
+        <inner.In>
+          <button>A</button>
+        </inner.In>
+        <outer.Out />
+        <inner.In>
+          <button>C</button>
+        </inner.In>
+        <outer.In>
+          <inner.In>
+            <button>B</button>
+          </inner.In>
+        </outer.In>
+        <LabeledOut tunnel={inner} name="inner" />
+      </>,
+    );
+    await flush();
+    const innerOut = container.querySelector<HTMLElement>(".inner")!;
+    expect(labelsIn(innerOut)).toEqual(["A", "B", "C"]);
+  });
+
   test("shows the fallback above an In while its content loads", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     function Data({ id }: { id: string }) {
       resource.useData(id);
@@ -1468,7 +2083,7 @@ describe("bridge", () => {
   });
 
   test("shows content when its suspension resolves", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     function Data({ id }: { id: string }) {
       resource.useData(id);
@@ -1492,7 +2107,7 @@ describe("bridge", () => {
   });
 
   test("keeps content state when content suspends after showing", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     function Data({ id }: { id: string }) {
       resource.useData(id);
@@ -1528,7 +2143,7 @@ describe("bridge", () => {
   });
 
   test("shows the fallback when an urgent update suspends content", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     const control = createRef<(id: string) => void>();
     function Data({ control }: { control: Ref<(id: string) => void> }) {
@@ -1560,7 +2175,7 @@ describe("bridge", () => {
   });
 
   test("keeps bridged content under StrictMode replays", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     const control = createRef<SetTheme>();
     function ThemeCounter() {
@@ -1637,8 +2252,40 @@ describe("bridge", () => {
     expect(screen.getByRole("button")).toHaveTextContent("nested light");
   });
 
+  test("renders a bridge without context when Function.prototype.bind is read-only", async () => {
+    const warnings = spyWarn();
+    const proto = Function.prototype;
+    const bind = proto.bind;
+    Object.defineProperty(proto, "bind", {
+      value: bind,
+      writable: false,
+      configurable: true,
+    });
+    try {
+      render(
+        <Theme value="outer">
+          <NestedRoot>
+            <ThemeLabel name="nested" />
+          </NestedRoot>
+        </Theme>,
+      );
+      await flush();
+    } finally {
+      Object.defineProperty(proto, "bind", {
+        value: bind,
+        writable: true,
+        configurable: true,
+      });
+    }
+    await flush();
+    expect(buttonLabels()).toEqual(["nested default"]);
+    expect(warnings()).toEqual([
+      expect.stringContaining("could not find its component's fiber"),
+    ]);
+  });
+
   test("carries context to an In given a ref", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const Value = createContext(0);
     function Content() {
       return <button>content {useContext(Value)}</button>;
@@ -1717,8 +2364,8 @@ function itemViews(container: HTMLElement): ItemView[] {
 }
 
 /** A value provided above one In; content loads per value. */
-async function setupUpdateApp() {
-  const tunnel = fiberTunnel({ bridge: true });
+async function setupUpdateApp({ isolate }: { isolate?: boolean } = {}) {
+  const tunnel = fiberTunnel({ isolate });
   const Value = createContext(0);
   const data = createResource<number>();
   data.resolve(1);
@@ -1786,8 +2433,11 @@ async function setupUpdateApp() {
 }
 
 /** A router-like page switch: page b mounts an In beside `Page`. */
-async function setupMountApp({ page = "" } = {}) {
-  const tunnel = fiberTunnel({ bridge: true });
+async function setupMountApp({
+  page = "",
+  isolate,
+}: { page?: string; isolate?: boolean } = {}) {
+  const tunnel = fiberTunnel({ isolate });
   const data = createResource<string>();
   const log: string[] = [];
   let pageRenders = 0;
@@ -1921,6 +2571,26 @@ describe("transitions", () => {
 
     await act(async () => app.data.resolve("b"));
     expect(app.primary).toHaveTextContent("B");
+    expect(within(app.out).getByRole("button")).toHaveTextContent("content b");
+    expect(app.log).not.toContain("fallback");
+  });
+
+  test("commits a transition while isolated content loads", async () => {
+    const app = await setupUpdateApp({ isolate: true });
+    await act(async () => app.transition(2));
+    expect(app.output()).toBe("2");
+
+    await act(async () => app.data.resolve(2));
+    expect(within(app.out).getByRole("button")).toHaveTextContent("content 2");
+    expect(app.log).not.toContain("fallback");
+  });
+
+  test("commits a transition mount while isolated content loads", async () => {
+    const app = await setupMountApp({ isolate: true });
+    await act(async () => app.goto("b"));
+    expect(app.primary).toHaveTextContent("B");
+
+    await act(async () => app.data.resolve("b"));
     expect(within(app.out).getByRole("button")).toHaveTextContent("content b");
     expect(app.log).not.toContain("fallback");
   });
@@ -2087,7 +2757,7 @@ describe("transitions", () => {
   });
 
   test("classifies a mount inside a retrying boundary as urgent", async () => {
-    const tunnel = fiberTunnel({ bridge: true });
+    const tunnel = fiberTunnel();
     const data = createResource<string>();
     let setShow!: (show: boolean) => void;
     let start!: (fn: () => void) => void;
@@ -2129,7 +2799,7 @@ describe("transitions", () => {
   test("keeps the committed value at the Out when a transition is abandoned", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const Value = createContext(0);
     const data = createResource<string>();
     data.resolve("a");
@@ -2186,7 +2856,7 @@ describe("transitions", () => {
   });
 
   test("waits for the Out when a `useContextBridge` host owns the source", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const Value = createContext(0);
     const data = createResource<number>();
     data.resolve(1);
@@ -2451,7 +3121,7 @@ describe("hiding", () => {
   );
 
   test("hides content that finishes loading while its In is hidden", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const data = createResource<string>();
     function Content() {
       data.useData("x");
@@ -2567,7 +3237,7 @@ function freezeCrossCheck() {
 }
 
 describe("sort", () => {
-  test("orders content by current positions after a parent bails out", () => {
+  test("orders content by current positions after a parent bails out", async () => {
     const t = fiberTunnel();
     const Leaf = memo(function Leaf({ label }: { label: string }) {
       return (
@@ -2596,10 +3266,10 @@ describe("sort", () => {
 
     const { rerender } = render(<App n={0} first="A" showB={false} />);
     // A's In gains a second generation; later passes bail out above it.
-    rerender(<App n={0} first="A1" showB={false} />);
-    rerender(<App n={1} first="A1" showB={false} />);
-    rerender(<App n={2} first="A1" showB={false} />);
-    rerender(<App n={3} first="A1" showB={true} />);
+    await act(async () => rerender(<App n={0} first="A1" showB={false} />));
+    await act(async () => rerender(<App n={1} first="A1" showB={false} />));
+    await act(async () => rerender(<App n={2} first="A1" showB={false} />));
+    await act(async () => rerender(<App n={3} first="A1" showB={true} />));
 
     expect(buttonLabels()).toEqual(["A1", "B", "C"]);
   });
@@ -2867,7 +3537,7 @@ describe("sort", () => {
   });
 
   test("places a probe by its committed ancestor's position before it commits", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     for (const label of ["A", "B", "C"]) resource.resolve(label);
     function Content({ label }: { label: string }) {
@@ -2912,8 +3582,52 @@ describe("sort", () => {
     expect(sortLabelsIn(out)).toEqual(["A", "X", "B", "C"]);
   });
 
+  test("places a probe under a FiberAnchor mounting in its pass by its committed ancestor's position", async () => {
+    const t = fiberTunnel();
+    const resource = createResource<string>();
+    for (const label of ["A", "B", "C"]) resource.resolve(label);
+    function Content({ label }: { label: string }) {
+      resource.useData(label);
+      return <button>{label}</button>;
+    }
+    let setOrder!: (order: string[]) => void;
+    function List() {
+      "use no memo";
+      const [order, set] = useState(["A", "B", "C"]);
+      useLayoutEffect(() => {
+        setOrder = set;
+      }, [set]);
+      return (
+        <ul>
+          {order.map((label) => (
+            <li key={label}>
+              <FiberAnchor>
+                <t.In>
+                  <Content label={label} />
+                </t.In>
+              </FiberAnchor>
+            </li>
+          ))}
+        </ul>
+      );
+    }
+
+    const { container: out } = await mountDomRoot(<t.Out />);
+    await settleOut(t);
+    render(<List />);
+    await act(async () => {});
+
+    await act(async () =>
+      startTransition(() => setOrder(["A", "X", "B", "C"])),
+    );
+    expect(itemOrder(out)).toEqual(["A", "X", "B", "C"]);
+
+    await act(async () => resource.resolve("X"));
+    expect(sortLabelsIn(out)).toEqual(["A", "X", "B", "C"]);
+  });
+
   test("orders a probe at commit when its pass also moves committed siblings", async () => {
-    const t = fiberTunnel({ bridge: true });
+    const t = fiberTunnel();
     const resource = createResource<string>();
     for (const label of ["A", "B", "C"]) resource.resolve(label);
     function Content({ label }: { label: string }) {

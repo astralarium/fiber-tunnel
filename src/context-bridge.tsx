@@ -43,19 +43,26 @@ const missingFiberWarning =
   "the bridge carries no context.";
 
 /** The calling component's fiber, on mount: React binds each state
- * dispatcher to the rendering fiber. Null after mount or on the server. */
+ * dispatcher to the rendering fiber. Null after mount, on the server, or
+ * with a read-only `Function.prototype.bind` (frozen intrinsics). */
 function useMountFiber(): Fiber | null {
   const proto = Function.prototype;
   const bind = proto.bind;
   let found: Fiber | null = null;
-  proto.bind = function (this: never, thisArg: unknown, ...args: unknown[]) {
-    if (found === null && isFiber(args[0])) found = args[0];
-    return bind.call(this, thisArg, ...args);
-  } as typeof bind;
+  let patched = false;
+  try {
+    proto.bind = function (this: never, thisArg: unknown, ...args: unknown[]) {
+      if (found === null && isFiber(args[0])) found = args[0];
+      return bind.call(this, thisArg, ...args);
+    } as typeof bind;
+    patched = true;
+  } catch {
+    // Read-only: the hook still runs, unpatched.
+  }
   try {
     useReducer(increment, 0);
   } finally {
-    proto.bind = bind;
+    if (patched) proto.bind = bind;
   }
   return found;
 }

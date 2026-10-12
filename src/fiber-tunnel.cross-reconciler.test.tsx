@@ -36,7 +36,7 @@ interface Pass {
 /** A primary app providing a value above a bridged In; content reads the
  * value at the Out and suspends until its data resolves. */
 function setupValueApp() {
-  const t = fiberTunnel({ bridge: true });
+  const t = fiberTunnel();
   const resource = createResource<number>();
   resource.resolve(1);
   const passes: Pass[] = [];
@@ -115,7 +115,7 @@ function setupValueApp() {
 /** A primary app whose page switch mounts a bridged In with loading
  * content. */
 function setupPageApp() {
-  const t = fiberTunnel({ bridge: true });
+  const t = fiberTunnel();
   const resource = createResource<string>();
   let fallbacks = 0;
   function Fallback() {

@@ -79,7 +79,7 @@ function createResource<K>() {
 /** A value provided above one In under a Suspense boundary; content loads
  * per value. The Out renders in its own root. */
 async function setupUpdateApp() {
-  const tunnel = fiberTunnel({ bridge: true });
+  const tunnel = fiberTunnel();
   const Value = createContext(0);
   const data = createResource<number>();
   data.resolve(1);

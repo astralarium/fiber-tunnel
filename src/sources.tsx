@@ -129,9 +129,7 @@ function sourceOf(fiber: Fiber): { source: Source; bridged: boolean } {
     const props = parent.pendingProps as { source: Source };
     return { source: props.source, bridged: true };
   }
-  let source =
-    sourcesByFiber.get(fiber) ??
-    (fiber.alternate ? sourcesByFiber.get(fiber.alternate) : undefined);
+  let source = sourceAt(fiber);
   if (!source) {
     const props = fiber.pendingProps as { value?: unknown } | null;
     source = createSource(fiber.type as Context<unknown>, props?.value);
@@ -156,13 +154,40 @@ export const emptyCapture: Capture = {
   strict: false,
 };
 
-/** Captures every provider above `fiber` in its own root. */
-export function captureAbove(fiber: Fiber, skip?: Context<unknown>): Capture {
+/** Item captures by the anchor value bridged content renders under. */
+const contentCaptures = new WeakMap<object, Capture>();
+
+/** Marks the provider of `anchor` as a content boundary: captures below
+ * it continue with `capture`. */
+export function markContent(anchor: object, capture: Capture) {
+  contentCaptures.set(anchor, capture);
+}
+
+/** The item capture a content boundary provider marks. */
+function contentCaptureOf(provider: Fiber): Capture | undefined {
+  const props = provider.pendingProps as { value?: unknown } | null;
+  const value = props?.value;
+  return typeof value === "object" && value !== null
+    ? contentCaptures.get(value)
+    : undefined;
+}
+
+/** Captures every provider above `fiber` in its own root. `fromItem`:
+ * inside bridged content, the item's capture, then the providers below
+ * it. */
+export function captureAbove(
+  fiber: Fiber,
+  skip?: Context<unknown>,
+  fromItem = false,
+): Capture {
   const path: Source[] = [];
   const readable = new Set<Source>();
   const seen = new Set<unknown>();
-  for (let node = fiber.return; node; node = node.return) {
-    if (node.tag !== ContextProviderTag || node.type === skip) continue;
+  let item: Capture | undefined;
+  for (let node = fiber.return; node && !item; node = node.return) {
+    if (node.tag !== ContextProviderTag) continue;
+    if (fromItem) item = contentCaptureOf(node);
+    if (node.type === skip) continue;
     const { source, bridged } = sourceOf(node);
     path.push(source);
     if (!seen.has(node.type)) {
@@ -170,11 +195,31 @@ export function captureAbove(fiber: Fiber, skip?: Context<unknown>): Capture {
       if (!bridged) readable.add(source);
     }
   }
+  path.reverse();
   return {
-    path: path.reverse(),
+    path: item ? [...item.path, ...path] : path,
     readable,
     strict: (fiber.mode & StrictLegacyMode) !== 0,
   };
+}
+
+/** Nearest provider fiber of each context above `fiber` in its own
+ * root. */
+export function nativeProvidersAbove(fiber: Fiber): Map<unknown, Fiber> {
+  const native = new Map<unknown, Fiber>();
+  for (let node = fiber.return; node; node = node.return) {
+    if (node.tag !== ContextProviderTag || native.has(node.type)) continue;
+    native.set(node.type, node);
+  }
+  return native;
+}
+
+/** The source of a provider fiber, once a capture created it. */
+export function sourceAt(provider: Fiber): Source | undefined {
+  return (
+    sourcesByFiber.get(provider) ??
+    (provider.alternate ? sourcesByFiber.get(provider.alternate) : undefined)
+  );
 }
 
 /** Adds `member` below its sources; takes ownership where none exists. */

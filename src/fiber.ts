@@ -99,6 +99,15 @@ export function sameFiber(a: Fiber, b: Fiber) {
   return a === b || a.alternate === b;
 }
 
+/** True when `ancestor`, either generation, is on `fiber`'s `return`
+ * chain. */
+export function isAncestor(ancestor: Fiber, fiber: Fiber) {
+  for (let node = fiber.return; node; node = node.return) {
+    if (sameFiber(node, ancestor)) return true;
+  }
+  return false;
+}
+
 /** Top of a `return` chain. */
 export function topOf(fiber: Fiber): Fiber {
   let node = fiber;
@@ -266,8 +275,19 @@ export function priorWorkCompleted(gate: Fiber, top: Fiber): boolean {
   return true;
 }
 
+/** Component types whose subtrees count as completed. */
+const completedTypes = new WeakSet<object>();
+
+/** Marks a component whose subtree never holds readiness. */
+export function markCompleted(type: object) {
+  completedTypes.add(type);
+}
+
 function subtreeCompleted(fiber: Fiber, parent: Fiber): boolean {
   if (fiber.return !== parent) return true;
+  if (typeof fiber.type === "function" && completedTypes.has(fiber.type)) {
+    return true;
+  }
   if (typeof fiber.flags === "number" && fiber.flags & Incomplete) return false;
   if (fiber.tag === SuspenseTag && fiber.memoizedState != null) {
     // Newly in fallback: the committed generation showed content.
