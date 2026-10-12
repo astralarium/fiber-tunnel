@@ -15,7 +15,7 @@ export default defineConfig({
     babel({ presets: [reactCompilerPreset()] }),
     dts({
       tsconfigPath: "./tsconfig.app.json",
-      exclude: ["**/*.test.*", "src/test-*", "src/react-reconciler.d.ts"],
+      exclude: ["**/*.test.*", "src/test-*.*", "src/react-reconciler.d.ts"],
       bundleTypes: true,
     }),
   ],
