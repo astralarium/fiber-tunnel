@@ -92,10 +92,12 @@ import { type FiberStep, pathKey, type RankCache, sortByKey } from "./util";
 /** Options of {@link fiberTunnel}. */
 export interface FiberTunnelOptions {
   /** True (default): content acts as a child of its In: it reads the
-   * In's context and StrictMode; suspensions and transitions surface at
-   * the In; nested tunnel Ins order at the In. An urgent suspend commits
-   * the In's siblings once before the fallback shows.
-   * False: content acts as a child of the Out. */
+   * In's context and StrictMode, plus contexts above the Out the In lacks;
+   * suspensions and transitions surface at the In; nested tunnel Ins order
+   * at the In. An urgent suspend commits the In's siblings once before the
+   * fallback shows.
+   * False: content acts as a child of the Out: its context, boundaries,
+   * and nested tunnel order. */
   bridge?: boolean;
   /** Content errors and suspensions surface at the Out;
    * transitions proceed while content loads. */
@@ -110,11 +112,12 @@ export interface FiberTunnelInProps {
 
 /** A tunnel created by {@link fiberTunnel}. */
 export interface FiberTunnel {
-  /** Sends its children to the Out. Content appears one commit after
-   * mount. */
+  /** Sends its children to the Out. Content commits after the In,
+   * before paint. */
   In: ComponentType<FiberTunnelInProps>;
   /** Renders the content. Mount one per tunnel: each Out renders a copy.
-   * Mounted together with Ins, paints empty once. */
+   * Mounted together with Ins, paints empty once. Suspends once on mount
+   * to check its renderer. Renders empty on the server until hydration. */
   Out: () => ReactNode;
   /** Re-reads order from the fiber tree. Needed only while the commit
    * hook is off; dev warns when it falls back. */

@@ -54,34 +54,29 @@ Create tunnels at module scope or in a component with `useState`.
 ## Behavior
 
 Content inside an `In` renders as if the `In` were a plain wrapper;
-its host output renders at the `Out`. Differences:
+its host output renders at the `Out`.
+React events bubble from the `Out`.
+SSR renders empty `Out`s until hydration.
+Await `act` in tests: the `Out` suspends once on mount.
 
-- Content commits after its `In`, before paint.
-- An urgent suspend commits the `In`'s siblings once before the
-  fallback shows.
-- React events bubble from the `Out`.
-- Content also reads contexts above the `Out` that the `In` lacks.
-- The `Out` suspends once on mount to check its renderer;
-  await `act` in tests.
-- SSR renders empty `Out`s until hydration.
+Mount only one `Out` per tunnel.
 
-## Setup
+## Nested roots
 
-- Mount only one `Out` per tunnel.
-- Wrap each nested React root's host in `<FiberAnchor>`.
-  Unanchored roots have no defined order.
-- Inside nested roots, wrap `In`s in `ContextBridge`:
+Wrap nested React roots in `FiberAnchor`.
+Pass the anchor's bridge to `ContextBridge` to share the outer providers.
 
 ```tsx
-import { ContextBridge, FiberAnchor, useContextBridge } from "fiber-tunnel";
+import { ContextBridge, FiberAnchor } from "fiber-tunnel";
 
 function Scene({ children }: { children: ReactNode }) {
-  const bridge = useContextBridge();
   return (
     <FiberAnchor>
-      <Canvas>
-        <ContextBridge bridge={bridge}>{children}</ContextBridge>
-      </Canvas>
+      {(bridge) => (
+        <Canvas>
+          <ContextBridge bridge={bridge}>{children}</ContextBridge>
+        </Canvas>
+      )}
     </FiberAnchor>
   );
 }
@@ -89,10 +84,9 @@ function Scene({ children }: { children: ReactNode }) {
 
 ## Options
 
-- `fiberTunnel({ bridge: false })`: content renders as a child of the
-  `Out`: its context, boundaries, and nested tunnel order.
+- `fiberTunnel({ bridge: false })`: content renders as a child of the `Out`.
 - `fiberTunnel({ isolate: true })`: content errors and suspensions
-  surface at the `Out`; transitions proceed while content loads.
+  surface at the `Out`.
 
 ## Acknowledgements
 

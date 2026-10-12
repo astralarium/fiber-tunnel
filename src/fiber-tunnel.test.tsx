@@ -37,7 +37,7 @@ import {
   forgetPathFiber,
   installCommitHook,
 } from "./commit-hook";
-import { ContextBridge, useContextBridge } from "./context-bridge";
+import { ContextBridge, type ContextBridgeValue } from "./context-bridge";
 import {
   type Fiber,
   type FiberRootLike,
@@ -545,23 +545,23 @@ describe("FiberAnchor", () => {
 
   test("warns when a root nested in an anchored root is unanchored", () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const t = fiberTunnel();
+    const t = fiberTunnel({ bridge: false });
     render(
       <>
         <FiberAnchor>
-          <NestedRoot>
+          <ChildRoot>
             <t.In>
               <button>B1</button>
             </t.In>
-            <NestedRoot>
+            <ChildRoot>
               <t.In>
                 <button>C</button>
               </t.In>
-            </NestedRoot>
+            </ChildRoot>
             <t.In>
               <button>B2</button>
             </t.In>
-          </NestedRoot>
+          </ChildRoot>
         </FiberAnchor>
         <t.Out />
       </>,
@@ -635,23 +635,19 @@ describe("FiberAnchor", () => {
         <t.In>
           <button>A</button>
         </t.In>
-        <FiberAnchor>
+        <NestedRoot>
+          <t.In>
+            <button>B1</button>
+          </t.In>
           <NestedRoot>
             <t.In>
-              <button>B1</button>
-            </t.In>
-            <FiberAnchor>
-              <NestedRoot>
-                <t.In>
-                  <button>C</button>
-                </t.In>
-              </NestedRoot>
-            </FiberAnchor>
-            <t.In>
-              <button>B2</button>
+              <button>C</button>
             </t.In>
           </NestedRoot>
-        </FiberAnchor>
+          <t.In>
+            <button>B2</button>
+          </t.In>
+        </NestedRoot>
         <t.In>
           <button>D</button>
         </t.In>
@@ -872,10 +868,24 @@ afterEach(() => {
   nestedRoots.clear();
 });
 
-/** A nested react-dom root rendering `children` under the caller's
- * context. */
+/** An anchored nested react-dom root rendering `children` under the
+ * providers above it. */
 function NestedRoot({ children }: { children: ReactNode }) {
-  const bridge = useContextBridge();
+  return (
+    <FiberAnchor>
+      {(bridge) => <BridgedRoot bridge={bridge}>{children}</BridgedRoot>}
+    </FiberAnchor>
+  );
+}
+
+/** A nested react-dom root rendering `children` under `bridge`. */
+function BridgedRoot({
+  bridge,
+  children,
+}: {
+  bridge: ContextBridgeValue;
+  children: ReactNode;
+}) {
   const rootRef = useRef<Root | null>(null);
   useLayoutEffect(() => {
     const container = document.createElement("div");
@@ -1281,13 +1291,11 @@ describe("bridge", () => {
         <t.In>
           <ThemeLabel name="A" />
         </t.In>
-        <FiberAnchor>
-          <NestedRoot>
-            <t.In>
-              <ThemeLabel name="B" />
-            </t.In>
-          </NestedRoot>
-        </FiberAnchor>
+        <NestedRoot>
+          <t.In>
+            <ThemeLabel name="B" />
+          </t.In>
+        </NestedRoot>
       </ThemeHost>,
     );
     await flush();
@@ -1601,22 +1609,20 @@ describe("bridge", () => {
         <inner.In>
           <button>A</button>
         </inner.In>
-        <FiberAnchor>
-          <NestedRoot>
+        <NestedRoot>
+          <inner.In>
+            <button>B1</button>
+          </inner.In>
+          <outer.In>
             <inner.In>
-              <button>B1</button>
+              <button>B2</button>
             </inner.In>
-            <outer.In>
-              <inner.In>
-                <button>B2</button>
-              </inner.In>
-              <button>outer</button>
-            </outer.In>
-            <inner.In>
-              <button>B3</button>
-            </inner.In>
-          </NestedRoot>
-        </FiberAnchor>
+            <button>outer</button>
+          </outer.In>
+          <inner.In>
+            <button>B3</button>
+          </inner.In>
+        </NestedRoot>
         <inner.In>
           <button>C</button>
         </inner.In>
@@ -2252,8 +2258,37 @@ describe("bridge", () => {
     expect(screen.getByRole("button")).toHaveTextContent("nested light");
   });
 
-  test("renders a bridge without context when Function.prototype.bind is read-only", async () => {
+  test("orders a nested root's Ins at the FiberAnchor that bridges it", async () => {
     const warnings = spyWarn();
+    const t = fiberTunnel();
+    const { container } = render(
+      <ThemeHost initial="dark">
+        <t.In>
+          <ThemeLabel name="Before" />
+        </t.In>
+        <FiberAnchor>
+          {(bridge) => (
+            <BridgedRoot bridge={bridge}>
+              <t.In>
+                <ThemeLabel name="Inside" />
+              </t.In>
+            </BridgedRoot>
+          )}
+        </FiberAnchor>
+        <t.In>
+          <ThemeLabel name="After" />
+        </t.In>
+        <LabeledOut tunnel={t} name="out" />
+      </ThemeHost>,
+    );
+    await flush();
+    await flush();
+    const out = container.querySelector<HTMLElement>(".out")!;
+    expect(labelsIn(out)).toEqual(["Before dark", "Inside dark", "After dark"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("carries context through a FiberAnchor bridge when Function.prototype.bind is read-only", async () => {
     const proto = Function.prototype;
     const bind = proto.bind;
     Object.defineProperty(proto, "bind", {
@@ -2264,9 +2299,13 @@ describe("bridge", () => {
     try {
       render(
         <Theme value="outer">
-          <NestedRoot>
-            <ThemeLabel name="nested" />
-          </NestedRoot>
+          <FiberAnchor>
+            {(bridge) => (
+              <BridgedRoot bridge={bridge}>
+                <ThemeLabel name="nested" />
+              </BridgedRoot>
+            )}
+          </FiberAnchor>
         </Theme>,
       );
       await flush();
@@ -2278,10 +2317,7 @@ describe("bridge", () => {
       });
     }
     await flush();
-    expect(buttonLabels()).toEqual(["nested default"]);
-    expect(warnings()).toEqual([
-      expect.stringContaining("could not find its component's fiber"),
-    ]);
+    expect(buttonLabels()).toEqual(["nested outer"]);
   });
 
   test("carries context to an In given a ref", async () => {
@@ -2855,7 +2891,7 @@ describe("transitions", () => {
     expect(within(out).getByRole("button")).toHaveTextContent("content 1");
   });
 
-  test("waits for the Out when a `useContextBridge` host owns the source", async () => {
+  test("waits for the Out when a FiberAnchor bridge owns the source", async () => {
     const t = fiberTunnel();
     const Value = createContext(0);
     const data = createResource<number>();
@@ -2874,8 +2910,7 @@ describe("transitions", () => {
     function Leaf() {
       return <b>{useContext(Value)}</b>;
     }
-    function Scene() {
-      const bridge = useContextBridge();
+    function SceneRoot({ bridge }: { bridge: ContextBridgeValue }) {
       useLayoutEffect(() => {
         nested.render(
           <ContextBridge bridge={bridge}>
@@ -2884,6 +2919,11 @@ describe("transitions", () => {
         );
       }, [bridge]);
       return null;
+    }
+    function Scene() {
+      return (
+        <FiberAnchor>{(bridge) => <SceneRoot bridge={bridge} />}</FiberAnchor>
+      );
     }
     let setValue!: (v: number) => void;
     let start!: (fn: () => void) => void;
