@@ -36,6 +36,7 @@ import {
   type TunnelCore,
 } from "./bridge-views";
 import {
+  addParentFiber,
   addPathFibers,
   commitHookOf,
   hookIntact,
@@ -330,7 +331,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
   /** Watches the path's roots and fibers for moves. */
   function trackPath(path: readonly FiberStep[]) {
     for (const step of path) {
-      addPathFibers(step.fiber);
+      addPathFibers(step.fiber, observer);
       if (!observedRoots.has(step.root) && hookOn) {
         observedRoots.add(step.root);
         observeRoot(step.root, observer);
@@ -374,9 +375,10 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     },
   };
 
-  /** A hidden item whose In left the tree; removed after commit. */
+  /** An unmounted or hidden item whose In left the tree; removed after
+   * commit. */
   function detached(item: Item) {
-    if (!item.hidden || item.probe) return false;
+    if (!(item.hidden || item.unmounted) || item.probe) return false;
     const fiber = item.path[item.path.length - 1]?.fiber;
     return !fiber || !isAttached(fiber);
   }
@@ -411,9 +413,11 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     return changed;
   }
 
-  /** Dev: a hooked commit that moved content without a re-sort. */
+  /** Dev: a hooked commit that moved content without a re-sort. One item
+   * never misorders. */
   function crossCheck() {
     if (!hookOn || !sortCache || sortCache.generation !== generation) return;
+    if (items.size < 2) return;
     const now = Date.now();
     if (now - lastCrossCheck < crossCheckMs) return;
     lastCrossCheck = now;
@@ -647,6 +651,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       children,
       anchor: { fiber, parent: owner.context },
       hidden: false,
+      unmounted: false,
       capture: owner.capture,
       probe,
       status: readyStatus,
@@ -654,6 +659,8 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       element: null,
     });
     trackPath(path);
+    // `below` ranks the probe among the anchor's children.
+    addParentFiber(anchor, observer);
     generation++;
     armAck(probe);
     armExpiry(probe);
@@ -764,6 +771,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           children: this.props.children,
           anchor,
           hidden: false,
+          unmounted: false,
           capture: this.capture,
           probe: null,
           status: readyStatus,
@@ -799,15 +807,19 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       this.mounted = true;
       this.statusListeners.delete(this.settleHidden);
       const item = this.item;
-      if (item) {
+      if (!item) {
+        this.register();
+      } else if (item.hidden || !items.has(item.key)) {
         // Revealed: same instance, same item.
-        if (!items.has(item.key)) items.set(item.key, item);
-        item.hidden = false;
+        items.set(item.key, item);
+        item.hidden = item.unmounted = false;
         item.element = null;
         this.syncAnchor(item);
         emit();
       } else {
-        this.register();
+        // A StrictMode replay: the item stayed.
+        item.unmounted = false;
+        if (this.syncAnchor(item)) emit();
       }
       if (bridge) join(this, this.capture.path);
     }
@@ -840,24 +852,32 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
 
     componentWillUnmount() {
       this.mounted = false;
+      if (this.item) this.item.unmounted = true;
+      queueMicrotask(this.disconnect);
+    }
+
+    /** Leaves the sources, then removes a deleted item or hides a hidden
+     * one. Runs after the commit: a StrictMode replay remounts first and
+     * changes nothing. */
+    disconnect = () => {
+      if (this.mounted) return;
       if (bridge) leave(this, this.capture.path);
       const item = this.item;
-      if (!item) return;
-      // A forwarded status keeps content visible while it loads or the
-      // In's boundary replaces it; it hides once ready.
-      if (item.status.kind === "ready") {
+      if (!item || !items.has(item.key)) return;
+      item.unmounted = false;
+      if (!isAttached(fiberOf(this))) {
+        remove(item);
+      } else if (item.status.kind === "ready") {
         item.hidden = true;
         item.element = null;
       } else {
+        // A forwarded status keeps content visible while it loads or the
+        // In's boundary replaces it; it hides once ready.
         this.statusListeners.add(this.settleHidden);
+        return;
       }
-      // Deletion detaches the fiber later in this commit; hiding keeps it.
-      queueMicrotask(() => {
-        if (this.mounted || !items.has(item.key)) return;
-        if (!isAttached(fiberOf(this))) remove(item);
-        emit();
-      });
-    }
+      emit();
+    };
 
     render() {
       if (!this.committed) this.prepare();
@@ -1147,7 +1167,10 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           if (count) outRoots.set(root, count);
           else outRoots.delete(root);
         }
-        if (visibleOuts === 0) releaseProbes();
+        // A StrictMode replay counts the Out again within the commit.
+        queueMicrotask(() => {
+          if (visibleOuts === 0) releaseProbes();
+        });
       };
     }, [out]);
 

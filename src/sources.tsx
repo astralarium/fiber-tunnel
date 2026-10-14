@@ -386,12 +386,17 @@ export function addGroup(source: Source, group: SourceGroup) {
   source.groups.add(group);
 }
 
-/** Removes an Out provider: hidden or unmounted Outs never block. */
+/** Removes an Out provider: hidden or unmounted Outs never block. Its
+ * candidates settle after the commit: a StrictMode replay re-adds it
+ * first. */
 export function removeGroup(source: Source, group: SourceGroup) {
   source.groups.delete(group);
-  for (const candidate of source.candidates.values()) {
-    if (!candidate.ready.done) settle(source, candidate, group);
-  }
+  queueMicrotask(() => {
+    if (source.groups.has(group)) return;
+    for (const candidate of source.candidates.values()) {
+      if (!candidate.ready.done) settle(source, candidate, group);
+    }
+  });
 }
 
 /** Reads sources in their own tree and publishes each committed value.

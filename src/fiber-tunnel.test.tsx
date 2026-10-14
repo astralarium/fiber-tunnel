@@ -2963,6 +2963,122 @@ describe("transitions", () => {
     expect(nested.text()).toBe("2");
     expect(fallbacks).toBe(0);
   });
+
+  // React 19.2 replays StrictMode effects below every fiber a keyed move
+  // passes.
+  test("keeps the primary pending when a StrictMode move replays the Out's waiting group", async () => {
+    const t = fiberTunnel();
+    const data = createResource<string>();
+    data.resolve("light");
+    function Content() {
+      const theme = use(Theme);
+      data.useData(theme);
+      return <button>content {theme}</button>;
+    }
+    const content = <Content />;
+    let setTheme!: (theme: string) => void;
+    let setOrder!: (order: string[]) => void;
+    function App() {
+      const [theme, setT] = useState("light");
+      const [order, setO] = useState(["x", "y"]);
+      setTheme = setT;
+      setOrder = setO;
+      return (
+        <>
+          <p>{theme}</p>
+          {order.map((key) =>
+            key === "x" ? (
+              <Theme key="x" value={theme}>
+                <t.In>{content}</t.In>
+              </Theme>
+            ) : (
+              <t.In key="y">
+                <button>y</button>
+              </t.In>
+            ),
+          )}
+        </>
+      );
+    }
+    const out = await mountDomRoot(
+      <StrictMode>
+        <t.Out />
+      </StrictMode>,
+    );
+    await settleOut(t);
+    const { container } = render(<App />);
+    await flush();
+    const primary = container.querySelector("p")!;
+    expect(labelsIn(out.container)).toEqual(["content light", "y"]);
+
+    await act(async () => startTransition(() => setTheme("dark")));
+    expect(primary).toHaveTextContent("light");
+    // The Out's Theme group moves behind y.
+    await act(async () => setOrder(["y", "x"]));
+    expect(primary).toHaveTextContent("light");
+
+    await act(async () => data.resolve("dark"));
+    expect(primary).toHaveTextContent("dark");
+    expect(labelsIn(out.container)).toEqual(["y", "content dark"]);
+  });
+
+  test("keeps a transition mount pending when a StrictMode move replays its nested Out", async () => {
+    const t = fiberTunnel();
+    const u = fiberTunnel();
+    const data = createResource<string>();
+    function Content() {
+      data.useData("b");
+      return <button>content b</button>;
+    }
+    let setPage!: (page: string) => void;
+    let setOrder!: (order: string[]) => void;
+    function App() {
+      const [page, setP] = useState("a");
+      const [order, setO] = useState(["p", "q"]);
+      setPage = setP;
+      setOrder = setO;
+      return (
+        <>
+          <p>{page}</p>
+          {order.map((key) =>
+            key === "p" ? (
+              <t.In key="p">
+                <u.Out />
+              </t.In>
+            ) : (
+              <t.In key="q">
+                <button>q</button>
+              </t.In>
+            ),
+          )}
+          {page === "b" && (
+            <u.In>
+              <Content />
+            </u.In>
+          )}
+        </>
+      );
+    }
+    const out = await mountDomRoot(
+      <StrictMode>
+        <t.Out />
+      </StrictMode>,
+    );
+    await settleOut(t);
+    const { container } = render(<App />);
+    await settleOut(u);
+    const primary = container.querySelector("p")!;
+
+    await act(async () => startTransition(() => setPage("b")));
+    expect(primary).toHaveTextContent("a");
+    // u's Out, inside p's content, moves behind q.
+    await act(async () => setOrder(["q", "p"]));
+    expect(primary).toHaveTextContent("a");
+
+    await act(async () => data.resolve("b"));
+    expect(primary).toHaveTextContent("b");
+    expect(labelsIn(out.container)).toEqual(["q", "content b"]);
+  });
 });
 /* eslint-enable react-hooks/globals */
 
@@ -3271,7 +3387,7 @@ const nodeGlobals = globalThis as unknown as {
 };
 
 /** Freezes `Date`: the dev cross-check re-sorts at most once per 100 ms,
- * so only its first run sorts. */
+ * so only its first run with two items sorts. */
 function freezeCrossCheck() {
   vi.useFakeTimers({ toFake: ["Date"] });
 }
@@ -3576,6 +3692,101 @@ describe("sort", () => {
     expect(sortByKey).not.toHaveBeenCalled();
   });
 
+  test("re-sorts only the tunnels whose Ins change relative order", async () => {
+    freezeCrossCheck();
+    const labels = ["A", "B", "C", "D"];
+    const every = fiberTunnel();
+    const sparse = fiberTunnel();
+    const own = new Map(labels.map((label) => [label, fiberTunnel()]));
+    const Card = memo(function Card({ label }: { label: string }) {
+      const single = own.get(label)!;
+      return (
+        <>
+          <every.In>
+            <button>{label}</button>
+          </every.In>
+          {(label === "A" || label === "C") && (
+            <sparse.In>
+              <button>{label}</button>
+            </sparse.In>
+          )}
+          <single.In>
+            <button>{label}</button>
+          </single.In>
+        </>
+      );
+    });
+    function App({ order }: { order: string[] }) {
+      return (
+        <>
+          <div>
+            {order.map((label) => (
+              <Card key={label} label={label} />
+            ))}
+          </div>
+          <div className="every">
+            <every.Out />
+          </div>
+          <div className="sparse">
+            <sparse.Out />
+          </div>
+          {labels.map((label) => {
+            const single = own.get(label)!;
+            return (
+              <div key={label} className={`own-${label}`}>
+                <single.Out />
+              </div>
+            );
+          })}
+        </>
+      );
+    }
+
+    const { rerender, container } = render(<App order={labels} />);
+    await flush();
+    vi.mocked(sortByKey).mockClear();
+    // React marks A, B, and C moved.
+    await act(async () => rerender(<App order={["D", "A", "B", "C"]} />));
+
+    const at = (name: string) => labelsIn(container.querySelector(name)!);
+    expect(at(".every")).toEqual(["D", "A", "B", "C"]);
+    expect(at(".sparse")).toEqual(["A", "C"]);
+    for (const label of labels) expect(at(`.own-${label}`)).toEqual([label]);
+    expect(sortByKey).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps passed items' content when a StrictMode keyed move replays their effects", async () => {
+    // React 19.2 replays effects below every fiber a keyed move passes.
+    const t = fiberTunnel();
+    const Card = memo(function Card({ label }: { label: string }) {
+      return (
+        <t.In>
+          <button>{label}</button>
+        </t.In>
+      );
+    });
+    function App({ order }: { order: string[] }) {
+      return (
+        <StrictMode>
+          {order.map((label) => (
+            <Card key={label} label={label} />
+          ))}
+          <t.Out />
+        </StrictMode>
+      );
+    }
+
+    const { rerender } = render(<App order={["A", "B", "C", "D", "E", "F"]} />);
+    await flush();
+    const renders = vi.spyOn(ItemView.prototype, "render");
+    await act(async () =>
+      rerender(<App order={["F", "A", "B", "C", "D", "E"]} />),
+    );
+
+    expect(buttonLabels()).toEqual(["F", "A", "B", "C", "D", "E"]);
+    expect(renders).not.toHaveBeenCalled();
+  });
+
   test("places a probe by its committed ancestor's position before it commits", async () => {
     const t = fiberTunnel();
     const resource = createResource<string>();
@@ -3620,6 +3831,64 @@ describe("sort", () => {
     await act(async () => resource.resolve("X"));
     expect(container.querySelectorAll("li")).toHaveLength(4);
     expect(sortLabelsIn(out)).toEqual(["A", "X", "B", "C"]);
+  });
+
+  test("re-sorts a probe when its committed ancestor's children reorder", async () => {
+    const warnings = spyWarn();
+    const t = fiberTunnel();
+    const resource = createResource<string>();
+    resource.resolve("X");
+    function Content({ label }: { label: string }) {
+      resource.useData(label);
+      return <button>{label}</button>;
+    }
+    let setOrder!: (order: string[]) => void;
+    let setShowN!: (show: boolean) => void;
+    function List() {
+      "use no memo";
+      const [order, setO] = useState(["Y", "X"]);
+      const [showN, setN] = useState(false);
+      useLayoutEffect(() => {
+        setOrder = setO;
+        setShowN = setN;
+      }, [setO, setN]);
+      const items = order.map((label) => (
+        <li key={label}>
+          {label === "X" && (
+            <t.In>
+              <Content label="X" />
+            </t.In>
+          )}
+        </li>
+      ));
+      if (showN) {
+        items.splice(
+          1,
+          0,
+          <li key="N">
+            <t.In>
+              <Content label="N" />
+            </t.In>
+          </li>,
+        );
+      }
+      return <ul>{items}</ul>;
+    }
+
+    const { container: out } = await mountDomRoot(<t.Out />);
+    await settleOut(t);
+    render(<List />);
+    await act(async () => {});
+    await act(async () => startTransition(() => setShowN(true)));
+    expect(itemOrder(out)).toEqual(["N", "X"]);
+
+    // X passes the probe; N's pass keeps its rank.
+    await act(async () => setOrder(["X", "Y"]));
+    expect(itemOrder(out)).toEqual(["X", "N"]);
+
+    await act(async () => resource.resolve("N"));
+    expect(sortLabelsIn(out)).toEqual(["X", "N"]);
+    expect(warnings()).toEqual([]);
   });
 
   test("places a probe under a FiberAnchor mounting in its pass by its committed ancestor's position", async () => {
@@ -3856,7 +4125,7 @@ describe("sort", () => {
       );
     }
 
-    const { rerender } = render(<App count={1} />);
+    const { rerender } = render(<App count={2} />);
     await act(async () => {});
     vi.mocked(sortByKey).mockClear();
     await act(async () => rerender(<App count={200} />));
@@ -4308,6 +4577,31 @@ describe("commit hook", () => {
     const now = Date.now();
     vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
 
+    await act(async () => root.render(<Board tunnel={t} order={["B", "A"]} />));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "the cross-check found a move the commit hook missed",
+      ),
+    );
+    expect(labels(container)).toEqual(["B", "A"]);
+  });
+
+  test("skips the dev cross-check until the tunnel holds two items", async () => {
+    const warn = hookSpyWarn();
+    // Each read passes the cross-check interval.
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => (now += 60_000));
+    const t = fiberTunnel();
+    const { root, container } = await mountDomRoot(
+      <Board tunnel={t} order={["A"]} />,
+    );
+    vi.mocked(sortByKey).mockClear();
+    await act(async () => root.render(<Board tunnel={t} order={["A"]} />));
+    expect(sortByKey).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<Board tunnel={t} order={["A", "B"]} />));
+    const fiberRoot = fiberRootOf(root);
+    forgetPathFiber(findFiber(fiberRoot.current!, Tiles)!);
     await act(async () => root.render(<Board tunnel={t} order={["B", "A"]} />));
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining(

@@ -58,6 +58,8 @@ export interface Item {
   anchor: FiberAnchorValue;
   /** The In is hidden; content keeps its state. */
   hidden: boolean;
+  /** The In unmounted; it hides, leaves, or remounts after the commit. */
+  unmounted: boolean;
   /** Bridged: providers and StrictMode above the In. */
   capture: Capture;
   probe: Probe | null;

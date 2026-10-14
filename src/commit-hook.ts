@@ -25,28 +25,61 @@ export interface CommitHook {
 
 /** Observes commits of roots holding its items. */
 export interface RootObserver {
-  /** `moved`: a path fiber's kept children changed order. */
+  /** `moved`: children on this observer's paths changed relative
+   * order. */
   onCommit(root: FiberRootLike, moved: boolean): void;
 }
 
 const observersByRoot = new WeakMap<FiberRootLike, Set<RootObserver>>();
 
-/** Chain fibers of registered paths, both generations. Entries stay; a
- * stale one costs at most a re-sort. */
-const pathFibers = new WeakSet<Fiber>();
+/** Observers by the chain fibers of their paths; both generations share
+ * one set. Entries stay; a stale one costs at most a re-sort. */
+const pathObservers = new WeakMap<Fiber, Set<RootObserver>>();
 
-/** Adds `fiber`'s chain to the path fibers. */
-export function addPathFibers(fiber: Fiber) {
+/** Observers by fibers whose every child they watch: a probe's committed
+ * ancestor. */
+const parentObservers = new WeakMap<Fiber, Set<RootObserver>>();
+
+/** Observers `map` holds for either generation of `fiber`. */
+function observersAt(
+  map: WeakMap<Fiber, Set<RootObserver>>,
+  fiber: Fiber,
+): Set<RootObserver> | undefined {
+  return (
+    map.get(fiber) ?? (fiber.alternate ? map.get(fiber.alternate) : undefined)
+  );
+}
+
+/** Adds `observer` under `fiber`; both generations share one set. */
+function watch(
+  map: WeakMap<Fiber, Set<RootObserver>>,
+  fiber: Fiber,
+  observer: RootObserver,
+) {
+  let observers = observersAt(map, fiber);
+  if (!observers) observers = new Set();
+  map.set(fiber, observers);
+  if (fiber.alternate) map.set(fiber.alternate, observers);
+  observers.add(observer);
+}
+
+/** Adds `fiber`'s chain to `observer`'s path fibers. */
+export function addPathFibers(fiber: Fiber, observer: RootObserver) {
   for (let n: Fiber | null = fiber; n; n = n.return) {
-    pathFibers.add(n);
-    if (n.alternate) pathFibers.add(n.alternate);
+    watch(pathObservers, n, observer);
   }
 }
 
-/** Removes one fiber, both generations, from the path fibers. Testing. */
+/** Watches every child of `fiber` for `observer`. */
+export function addParentFiber(fiber: Fiber, observer: RootObserver) {
+  watch(parentObservers, fiber, observer);
+}
+
+/** Removes one fiber, both generations, from every observer's path.
+ * Testing. */
 export function forgetPathFiber(fiber: Fiber) {
-  pathFibers.delete(fiber);
-  if (fiber.alternate) pathFibers.delete(fiber.alternate);
+  pathObservers.delete(fiber);
+  if (fiber.alternate) pathObservers.delete(fiber.alternate);
 }
 
 export function observeRoot(root: FiberRootLike, observer: RootObserver) {
@@ -63,10 +96,10 @@ export function unobserveRoot(root: FiberRootLike, observer: RootObserver) {
 function onCommit(finishedWork: Fiber, root: FiberRootLike) {
   const observers = observersByRoot.get(root);
   if (!observers?.size) return;
-  const moved = pathsMoved(finishedWork);
+  const moved = movedObservers(finishedWork);
   for (const observer of observers) {
     try {
-      observer.onCommit(root, moved);
+      observer.onCommit(root, moved.has(observer));
     } catch (error) {
       reportListenerError(error);
     }
@@ -149,23 +182,43 @@ export function commitHookOf(root: FiberRootLike): CommitHook | null {
   return hook?.version === protocolVersion ? hook : null;
 }
 
-/** True when a path fiber's kept children changed relative order this
- * commit. Descends only where `subtreeFlags` carries Placement: React
- * clears it on placed fibers in the mutation phase; ancestors keep it. */
-function pathsMoved(finishedWork: Fiber): boolean {
+/** Observers whose path children changed relative order this commit.
+ * Descends only where `subtreeFlags` carries Placement: React clears it
+ * on placed fibers in the mutation phase; ancestors keep it. */
+function movedObservers(finishedWork: Fiber): Set<RootObserver> {
+  const moved = new Set<RootObserver>();
   const stack: Fiber[] = [finishedWork];
   while (stack.length) {
     const node = stack.pop()!;
     if (!(node.subtreeFlags & Placement)) continue;
-    const onPath =
-      pathFibers.has(node) ||
-      (node.alternate !== null && pathFibers.has(node.alternate));
-    if (onPath && childrenReordered(node)) return true;
+    const parents = observersAt(parentObservers, node);
+    if (
+      (parents || observersAt(pathObservers, node)) &&
+      childrenReordered(node)
+    ) {
+      parents?.forEach((observer) => moved.add(observer));
+      addReordered(node, moved);
+    }
     for (let c = node.child; c; c = c.sibling) {
       if (c.subtreeFlags & Placement) stack.push(c);
     }
   }
-  return false;
+  return moved;
+}
+
+/** Adds each observer whose kept children of `parent` on its paths
+ * changed relative order: `childrenReordered` per observer. */
+function addReordered(parent: Fiber, moved: Set<RootObserver>) {
+  const lastOld = new Map<RootObserver, number>();
+  for (let c = parent.child; c; c = c.sibling) {
+    const alt = c.alternate;
+    const observers = alt && observersAt(pathObservers, c);
+    if (!observers) continue;
+    for (const observer of observers) {
+      if (alt.index < (lastOld.get(observer) ?? -1)) moved.add(observer);
+      else lastOld.set(observer, alt.index);
+    }
+  }
 }
 
 /** React's `placeChild` test: a kept child whose old index falls below an
