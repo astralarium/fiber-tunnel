@@ -15,10 +15,10 @@ import {
   useTransition,
 } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { renderingFiberOf, renderLanesOf } from "./fiber";
-import { fiberTunnel, transitionsWait } from "./fiber-tunnel";
+import { type FiberTunnel, fiberTunnel, transitionsWait } from "./fiber-tunnel";
 import { createHostRoot, type HostRoot } from "./test-host";
 import { createResource, mountHostRoot, settleOut } from "./test-utils";
 
@@ -270,5 +270,42 @@ describe("cross-reconciler", () => {
     await act(async () => app.resource.resolve("b"));
     expect(primary.container.textContent).toBe("B");
     expect(out.buttons()).toEqual(["content b"]);
+  });
+
+  test("content moving between tunnels mounts its nested Out once", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const a = fiberTunnel();
+    const b = fiberTunnel();
+    const nested = fiberTunnel();
+    function App({ to }: { to: FiberTunnel }) {
+      return (
+        <>
+          <to.In>
+            <nested.Out />
+          </to.In>
+          <nested.In>
+            <button>Moved</button>
+          </nested.In>
+        </>
+      );
+    }
+    const out = await mountHostRoot(
+      <>
+        <a.Out />
+        <b.Out />
+      </>,
+    );
+    const { rerender } = render(<App to={a} />);
+    await act(async () => {});
+
+    // Sync act: the Outs' root renders ahead of the commit's microtasks.
+    act(() => rerender(<App to={b} />));
+    await act(async () => {});
+
+    expect(error).not.toHaveBeenCalledWith(
+      expect.stringContaining("Multiple tunnel Outs"),
+    );
+    expect(out.buttons()).toEqual(["Moved"]);
+    error.mockRestore();
   });
 });

@@ -710,6 +710,77 @@ describe("multiple Outs", () => {
     consoleError.mockRestore();
   });
 
+  test("content moving between tunnels mounts its nested Out once", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const a = fiberTunnel();
+    const b = fiberTunnel();
+    const nested = fiberTunnel();
+    function App({ to }: { to: FiberTunnel }) {
+      return (
+        <>
+          <a.Out />
+          <b.Out />
+          <to.In>
+            <nested.Out />
+          </to.In>
+          <nested.In>
+            <button>Moved</button>
+          </nested.In>
+        </>
+      );
+    }
+    const { rerender } = render(<App to={a} />);
+    await act(async () => rerender(<App to={b} />));
+
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(buttonLabels()).toEqual(["Moved"]);
+    consoleError.mockRestore();
+  });
+
+  test("content moving between tunnels mounts its nested Out once with move detection off", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const a = fiberTunnel();
+    const b = fiberTunnel();
+    const nested = fiberTunnel();
+    function App({ to }: { to: FiberTunnel }) {
+      return (
+        <>
+          <a.Out />
+          <b.Out />
+          <to.In>
+            <nested.Out />
+          </to.In>
+          <nested.In>
+            <button>Moved</button>
+          </nested.In>
+        </>
+      );
+    }
+    const { root } = await mountDomRoot(null);
+    // A non-configurable `current` blocks the commit hook.
+    const fiberRoot = fiberRootOf(root);
+    Object.defineProperty(fiberRoot, "current", {
+      configurable: false,
+      writable: true,
+      value: fiberRoot.current,
+    });
+    await act(async () => root.render(<App to={a} />));
+    expect(consoleWarn).toHaveBeenCalledWith(
+      expect.stringContaining("move detection is off"),
+    );
+    await act(async () => root.render(<App to={b} />));
+
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(buttonLabels()).toEqual(["Moved"]);
+    consoleError.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
   test("dev errors once per Out that mounts beside another", async () => {
     const consoleError = vi
       .spyOn(console, "error")
@@ -4584,6 +4655,40 @@ describe("commit hook", () => {
       ),
     );
     expect(labels(container)).toEqual(["B", "A"]);
+  });
+
+  test("skips items under an unmounted anchor in the dev cross-check", async () => {
+    const warn = hookSpyWarn();
+    const t = fiberTunnel();
+    let anchor: FiberAnchorValue | null = null;
+    function CaptureAnchor() {
+      const value = useContext(FiberAnchorContext);
+      useLayoutEffect(() => {
+        anchor = value;
+      });
+      return null;
+    }
+    const host = await mountDomRoot(
+      <FiberAnchor>
+        <CaptureAnchor />
+      </FiberAnchor>,
+    );
+    await mountDomRoot(<t.Out />);
+    const child = (order: string[]) => (
+      <FiberAnchorContext value={anchor}>
+        <Tiles tunnel={t} order={order} />
+      </FiberAnchorContext>
+    );
+    const { root, container } = await mountDomRoot(child(["A"]));
+    // B mounts later and sorts first: id order differs from tree order.
+    await act(async () => root.render(child(["B", "A"])));
+    // Past the cross-check interval.
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+
+    await act(async () => host.root.render(null));
+    expect(warn).not.toHaveBeenCalled();
+    expect(container).toBeEmptyDOMElement();
   });
 
   test("skips the dev cross-check until the tunnel holds two items", async () => {

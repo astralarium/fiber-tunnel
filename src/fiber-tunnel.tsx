@@ -260,6 +260,8 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
   const observedRoots = new Set<FiberRootLike>();
   const checkedRoots = new WeakSet<FiberRootLike>();
   let afterCommitQueued = false;
+  /** An In unmounted since the last hooked commit. */
+  let unmountPending = false;
   let lastCrossCheck = -Infinity;
 
   // Transitions (bridged).
@@ -361,6 +363,12 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
   const observer: RootObserver = {
     onCommit(_root, moved) {
       if (!hookOn) return;
+      // Deletions are done and layout is next: an In mounting in another
+      // tunnel lands in the same Out commit as this removal.
+      if (unmountPending) {
+        unmountPending = false;
+        if (removeDetached()) emit();
+      }
       if (moved) {
         generation++;
         queueEmit();
@@ -383,15 +391,21 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     return !fiber || !isAttached(fiber);
   }
 
-  /** Removes hidden items whose In left the tree and probes whose mount
-   * pass will not commit. True when content changed. */
-  function afterCommit() {
+  /** Removes items whose In left the tree. True when any. */
+  function removeDetached() {
     let changed = false;
     for (const item of items.values()) {
       if (!detached(item)) continue;
       remove(item);
       changed = true;
     }
+    return changed;
+  }
+
+  /** Removes hidden items whose In left the tree and probes whose mount
+   * pass will not commit. True when content changed. */
+  function afterCommit() {
+    let changed = removeDetached();
     for (const probe of probes) {
       const { anchor } = probe.position;
       if (!isAttached(anchor)) {
@@ -421,8 +435,11 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     const now = Date.now();
     if (now - lastCrossCheck < crossCheckMs) return;
     lastCrossCheck = now;
-    const cached = sortCache.keys.filter((key) => items.has(key));
-    const fresh = sortKeys();
+    // An item under an unmounted anchor has no position until it leaves.
+    const entries = keyedItems().filter((entry) => entry.key);
+    const placed = new Set(entries.map((entry) => entry.item));
+    const cached = sortCache.keys.filter((key) => placed.has(key));
+    const fresh = sortByKey(entries);
     if (cached.some((key, i) => key !== fresh[i])) {
       hookFallback("the cross-check found a move the commit hook missed");
     }
@@ -462,23 +479,22 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     }
   }
 
-  function sortKeys(): string[] {
+  /** Items keyed by tree position, unsorted. */
+  function keyedItems() {
     const cache: RankCache = new Map();
-    return sortByKey(
-      [...items.values()].map((item) => ({
-        item: item.key,
-        key: pathKey(item.path, cache, item.below ?? undefined),
-        // A probe precedes a committed item with an equal key.
-        order: item.probe ? -1 : item.id,
-      })),
-    );
+    return [...items.values()].map((item) => ({
+      item: item.key,
+      key: pathKey(item.path, cache, item.below ?? undefined),
+      // A probe precedes a committed item with an equal key.
+      order: item.probe ? -1 : item.id,
+    }));
   }
 
   /** Items in tree order, sorted once per generation; detached items
    * left out. */
   function sortedItems(): Item[] {
     if (!hookOn || !sortCache || sortCache.generation !== generation) {
-      sortCache = { generation, keys: sortKeys() };
+      sortCache = { generation, keys: sortByKey(keyedItems()) };
     }
     const sorted: Item[] = [];
     for (const key of sortCache.keys) {
@@ -852,7 +868,13 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
 
     componentWillUnmount() {
       this.mounted = false;
-      if (this.item) this.item.unmounted = true;
+      if (this.item) {
+        this.item.unmounted = true;
+        // The commit hook publishes the removal; without it, this emits
+        // mid-mutation.
+        if (hookOn) unmountPending = true;
+        else emit();
+      }
       queueMicrotask(this.disconnect);
     }
 
