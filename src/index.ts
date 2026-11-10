@@ -2,6 +2,8 @@ export {
   ContextBridge,
   type ContextBridgeProps,
   type ContextBridgeValue,
+  ContextCapture,
+  type ContextCaptureProps,
 } from "./context-bridge";
 export { FiberAnchor, type FiberAnchorProps } from "./fiber-anchor";
 export {

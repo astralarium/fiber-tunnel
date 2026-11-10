@@ -82,6 +82,19 @@ function Scene({ children }: { children: ReactNode }) {
 }
 ```
 
+## Context capture
+
+```tsx
+import { ContextBridge, ContextCapture } from "fiber-tunnel";
+
+<ContextCapture>{(bridge) => <Register bridge={bridge} />}</ContextCapture>;
+
+// Elsewhere, in any root:
+<ContextBridge bridge={bridge}>
+  <Item />
+</ContextBridge>;
+```
+
 ## Options
 
 - `fiberTunnel({ bridge: false })`: content renders as a child of the `Out`.

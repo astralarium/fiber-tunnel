@@ -37,7 +37,11 @@ import {
   forgetPathFiber,
   installCommitHook,
 } from "./commit-hook";
-import { ContextBridge, type ContextBridgeValue } from "./context-bridge";
+import {
+  ContextBridge,
+  type ContextBridgeValue,
+  ContextCapture,
+} from "./context-bridge";
 import {
   type Fiber,
   type FiberRootLike,
@@ -2411,6 +2415,297 @@ describe("bridge", () => {
     await act(async () => {});
     expect(out.textContent).toBe("content 1");
     expect(ref.current).not.toBeNull();
+  });
+});
+
+/** Captures the providers above it; hands the bridge to `onBridge`. */
+function Capture({
+  local,
+  onBridge,
+}: {
+  local?: boolean;
+  onBridge: (bridge: ContextBridgeValue) => void;
+}) {
+  return (
+    <ContextCapture local={local}>
+      {(bridge) => <ReportBridge bridge={bridge} onBridge={onBridge} />}
+    </ContextCapture>
+  );
+}
+
+function ReportBridge({
+  bridge,
+  onBridge,
+}: {
+  bridge: ContextBridgeValue;
+  onBridge: (bridge: ContextBridgeValue) => void;
+}) {
+  useLayoutEffect(() => onBridge(bridge), [bridge, onBridge]);
+  return null;
+}
+
+const Other = createContext("none");
+
+/** Bridges of captures "a" and "b", and the callbacks that report them. */
+function useBridges() {
+  const [bridges, setBridges] = useState<
+    Partial<Record<"a" | "b", ContextBridgeValue>>
+  >({});
+  const [onA] = useState(
+    () => (bridge: ContextBridgeValue) =>
+      setBridges((prev) => ({ ...prev, a: bridge })),
+  );
+  const [onB] = useState(
+    () => (bridge: ContextBridgeValue) =>
+      setBridges((prev) => ({ ...prev, b: bridge })),
+  );
+  return { bridges, onA, onB };
+}
+
+describe("ContextCapture", () => {
+  /** Two captures under Theme "a" and "b" (and Other, with `other`); a
+   * site bridging one of them, chosen by `use`. */
+  function SwapScene({
+    use: which,
+    other = false,
+  }: {
+    use: "a" | "b";
+    other?: boolean;
+  }) {
+    const { bridges, onA, onB } = useBridges();
+    const bridge = bridges[which];
+    return (
+      <>
+        <Theme value="a">
+          <Capture onBridge={onA} />
+        </Theme>
+        <Theme value="b">
+          {other ? (
+            <Other value="b">
+              <Capture onBridge={onB} />
+            </Other>
+          ) : (
+            <Capture onBridge={onB} />
+          )}
+        </Theme>
+        {bridge && (
+          <ContextBridge bridge={bridge}>
+            <Counter name="count" />
+            <ThemeLabel name="theme" />
+          </ContextBridge>
+        )}
+      </>
+    );
+  }
+
+  test("ContextBridge renders a same-root capture's context", async () => {
+    const control = createRef<SetTheme>();
+    function Scene() {
+      const [bridge, setBridge] = useState<ContextBridgeValue | null>(null);
+      return (
+        <>
+          <ThemeHost initial="dark" control={control}>
+            <Capture onBridge={setBridge} />
+          </ThemeHost>
+          <Theme value="site">
+            {bridge && (
+              <ContextBridge bridge={bridge}>
+                <ThemeLabel name="bridged" />
+              </ContextBridge>
+            )}
+          </Theme>
+        </>
+      );
+    }
+    render(<Scene />);
+    await flush();
+    expect(buttonLabels()).toEqual(["bridged dark"]);
+
+    await act(async () => control.current!("light"));
+    expect(buttonLabels()).toEqual(["bridged light"]);
+  });
+
+  test("ContextBridge keeps children mounted across a bridge swap with the same contexts and takes the new values", async () => {
+    const warnings = spyWarn();
+    const { rerender } = render(<SwapScene use="a" />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+    expect(buttonLabels()).toEqual(["count 1", "theme a"]);
+
+    rerender(<SwapScene use="b" />);
+    await flush();
+    expect(buttonLabels()).toEqual(["count 1", "theme b"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("ContextBridge keeps children mounted across a bridge swap under StrictMode", async () => {
+    const warnings = spyWarn();
+    const { rerender } = render(
+      <StrictMode>
+        <SwapScene use="a" />
+      </StrictMode>,
+    );
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+    rerender(
+      <StrictMode>
+        <SwapScene use="b" />
+      </StrictMode>,
+    );
+    await flush();
+    expect(buttonLabels()).toEqual(["count 1", "theme b"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("ContextBridge keeps children mounted across bridges nesting the same contexts in another order", async () => {
+    const warnings = spyWarn();
+    function Scene({ use: which }: { use: "a" | "b" }) {
+      const { bridges, onA, onB } = useBridges();
+      const bridge = bridges[which];
+      return (
+        <>
+          <Theme value="a">
+            <Other value="a">
+              <Capture onBridge={onA} />
+            </Other>
+          </Theme>
+          <Other value="b">
+            <Theme value="b">
+              <Capture onBridge={onB} />
+            </Theme>
+          </Other>
+          {bridge && (
+            <ContextBridge bridge={bridge}>
+              <Counter name="count" />
+              <ThemeLabel name="theme" />
+            </ContextBridge>
+          )}
+        </>
+      );
+    }
+    const { rerender } = render(<Scene use="a" />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+    rerender(<Scene use="b" />);
+    await flush();
+    expect(buttonLabels()).toEqual(["count 1", "theme b"]);
+    expect(warnings()).toEqual([]);
+  });
+
+  test("ContextBridge remounts children and warns once when a swapped bridge provides other contexts", async () => {
+    const warnings = spyWarn();
+    const { rerender } = render(<SwapScene use="a" other />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+    rerender(<SwapScene use="b" other />);
+    await flush();
+    expect(buttonLabels()).toEqual(["count 0", "theme b"]);
+
+    rerender(<SwapScene use="a" other />);
+    await flush();
+    expect(buttonLabels()).toEqual(["count 0", "theme a"]);
+    expect(warnings()).toEqual([
+      expect.stringContaining("ContextBridge's new bridge provides other"),
+    ]);
+  });
+
+  test("ContextBridge reads providers it shares with the capture in the same commit", async () => {
+    const control = createRef<SetTheme>();
+    const seen: string[] = [];
+    function Probe() {
+      const value = use(Theme);
+      useLayoutEffect(() => {
+        seen.push(`${value}: ${buttonLabels().join()}`);
+      }, [value]);
+      return null;
+    }
+    function Scene() {
+      const [bridge, setBridge] = useState<ContextBridgeValue | null>(null);
+      return (
+        <ThemeHost initial="dark" control={control}>
+          <Capture onBridge={setBridge} />
+          {bridge && (
+            <ContextBridge bridge={bridge}>
+              <ThemeLabel name="bridged" />
+            </ContextBridge>
+          )}
+          <Probe />
+        </ThemeHost>
+      );
+    }
+    render(<Scene />);
+    await flush();
+
+    await act(async () => control.current!("light"));
+    expect(seen.at(-1)).toBe("light: bridged light");
+  });
+
+  test("a local ContextCapture leaves out contexts a tunnel bridges in", async () => {
+    const t = fiberTunnel();
+    function Scene() {
+      const [local, setLocal] = useState<ContextBridgeValue | null>(null);
+      const [full, setFull] = useState<ContextBridgeValue | null>(null);
+      return (
+        <>
+          <Theme value="in">
+            <t.In>
+              <Capture local onBridge={setLocal} />
+              <Capture onBridge={setFull} />
+            </t.In>
+          </Theme>
+          <t.Out />
+          <Theme value="site">
+            {local && (
+              <ContextBridge bridge={local}>
+                <ThemeLabel name="local" />
+              </ContextBridge>
+            )}
+            {full && (
+              <ContextBridge bridge={full}>
+                <ThemeLabel name="full" />
+              </ContextBridge>
+            )}
+          </Theme>
+        </>
+      );
+    }
+    render(<Scene />);
+    await flush();
+    await flush();
+    expect(buttonLabels()).toEqual(["local site", "full in"]);
+  });
+
+  test("a local ContextCapture carries providers rendered in tunneled content", async () => {
+    const t = fiberTunnel();
+    function Scene() {
+      const [local, setLocal] = useState<ContextBridgeValue | null>(null);
+      return (
+        <>
+          <Theme value="in">
+            <t.In>
+              <Theme value="content">
+                <Capture local onBridge={setLocal} />
+              </Theme>
+            </t.In>
+          </Theme>
+          <t.Out />
+          <Theme value="site">
+            {local && (
+              <ContextBridge bridge={local}>
+                <ThemeLabel name="local" />
+              </ContextBridge>
+            )}
+          </Theme>
+        </>
+      );
+    }
+    render(<Scene />);
+    await flush();
+    await flush();
+    expect(buttonLabels()).toEqual(["local content"]);
   });
 });
 
