@@ -5,14 +5,17 @@ import type { Capture } from "./sources";
 
 declare const shapeBrand: unique symbol;
 
-/** The contexts every bridge sharing it provides, from
- * {@link createContextBridgeShape}. Grows as captures join. */
+/** The contexts every bridge sharing it provides, and whether they
+ * render in StrictMode, from {@link createContextBridgeShape}. Grows as
+ * captures join. */
 export interface ContextBridgeShape {
   readonly [shapeBrand]: true;
 }
 
 interface ShapeState {
   contexts: Set<Context<unknown>>;
+  /** A strict capture joined. */
+  strict: boolean;
   /** Bridges re-rendering on growth. */
   listeners: Set<() => void>;
   /** Dev: the size warning fired. */
@@ -37,6 +40,7 @@ export function createContextBridgeShape(): ContextBridgeShape {
   const shape = {} as ContextBridgeShape;
   shapes.set(shape, {
     contexts: new Set(),
+    strict: false,
     listeners: new Set(),
     warned: false,
   });
@@ -48,13 +52,22 @@ export function shapeContexts(shape: ContextBridgeShape) {
   return shapes.get(shape)!.contexts;
 }
 
-/** Adds `capture`'s contexts to `shape`; notifies its bridges on
- * growth. */
+/** Whether `shape`'s bridges render StrictMode. */
+export function shapeStrict(shape: ContextBridgeShape) {
+  return shapes.get(shape)!.strict;
+}
+
+/** Adds `capture`'s contexts and StrictMode to `shape`; notifies its
+ * bridges on growth. */
 export function extendShape(shape: ContextBridgeShape, capture: Capture) {
   const state = shapes.get(shape)!;
-  const size = state.contexts.size;
-  for (const source of capture.path) state.contexts.add(source.context);
-  if (state.contexts.size === size) return;
+  let grew = capture.strict && !state.strict;
+  state.strict ||= capture.strict;
+  for (const { context } of capture.path) {
+    grew ||= !state.contexts.has(context);
+    state.contexts.add(context);
+  }
+  if (!grew) return;
   if (isDevEnv && !state.warned && state.contexts.size > maxShapeContexts) {
     state.warned = true;
     console.warn(sizeWarning);
@@ -62,7 +75,7 @@ export function extendShape(shape: ContextBridgeShape, capture: Capture) {
   for (const listener of state.listeners) listener();
 }
 
-/** Calls `onGrow` when `shape` gains a context. */
+/** Calls `onGrow` when `shape` gains a context or StrictMode. */
 export function subscribeShape(shape: ContextBridgeShape, onGrow: () => void) {
   shapes.get(shape)!.listeners.add(onGrow);
 }

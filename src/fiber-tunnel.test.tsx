@@ -2751,6 +2751,75 @@ describe("ContextCapture", () => {
       expect(warnings()).toEqual([]);
     });
 
+    /** Captures "a" (in StrictMode, mounted with `a`) and "b" in `shape`;
+     * a site bridging the chosen one. */
+    function StrictScene({
+      shape,
+      use: which,
+      a = true,
+    }: {
+      shape: ContextBridgeShape;
+      use: "a" | "b";
+      a?: boolean;
+    }) {
+      const { bridges, onA, onB } = useBridges();
+      const bridge = bridges[which];
+      return (
+        <>
+          {a && (
+            <StrictMode>
+              <Theme value="a">
+                <Capture shape={shape} onBridge={onA} />
+              </Theme>
+            </StrictMode>
+          )}
+          <Theme value="b">
+            <Capture shape={shape} onBridge={onB} />
+          </Theme>
+          {bridge && (
+            <ContextBridge bridge={bridge} shape={shape}>
+              <Counter name="count" />
+              <ThemeLabel name="theme" />
+            </ContextBridge>
+          )}
+        </>
+      );
+    }
+
+    test("a shaped ContextBridge keeps children mounted across a swap between a strict and a loose capture", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const { rerender } = render(<StrictScene shape={shape} use="a" />);
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(<StrictScene shape={shape} use="b" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1", "theme b"]);
+
+      rerender(<StrictScene shape={shape} use="a" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1", "theme a"]);
+      expect(warnings()).toEqual([]);
+    });
+
+    test("a shaped ContextBridge remounts children and warns once when its shape turns strict", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const { rerender } = render(
+        <StrictScene shape={shape} use="b" a={false} />,
+      );
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(<StrictScene shape={shape} use="b" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 0", "theme b"]);
+      expect(warnings()).toEqual([
+        expect.stringContaining("shaped ContextBridge's providers changed"),
+      ]);
+    });
+
     test("a shaped ContextBridge remounts children and warns once when its shape gains a context", async () => {
       const warnings = spyWarn();
       const shape = createContextBridgeShape();
@@ -2892,6 +2961,56 @@ describe("ContextCapture", () => {
       expect(buttonLabels()).toEqual(["count 1"]);
       expect(warnings()).toEqual([]);
     });
+
+    test.each(["before", "after"] as const)(
+      "a shaped ContextBridge takes StrictMode from a strict capture mounting %s it in its commit",
+      async (order) => {
+        const warnings = spyWarn();
+        const shape = createContextBridgeShape();
+        function Scene({
+          show,
+          use: which,
+        }: {
+          show: boolean;
+          use: "a" | "b";
+        }) {
+          const { bridges, onA, onB } = useBridges();
+          const bridge = bridges[which] ?? bridges.a;
+          const strict = show && (
+            <StrictMode>
+              <Theme value="b">
+                <Capture shape={shape} onBridge={onB} />
+              </Theme>
+            </StrictMode>
+          );
+          return (
+            <>
+              <Theme value="a">
+                <Capture shape={shape} onBridge={onA} />
+              </Theme>
+              {order === "before" && strict}
+              {show && bridge && (
+                <ContextBridge bridge={bridge} shape={shape}>
+                  <Counter name="count" />
+                  <ThemeLabel name="theme" />
+                </ContextBridge>
+              )}
+              {order === "after" && strict}
+            </>
+          );
+        }
+        const { rerender } = render(<Scene show={false} use="a" />);
+        await flush();
+        rerender(<Scene show use="a" />);
+        await flush();
+        fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+        rerender(<Scene show use="b" />);
+        await flush();
+        expect(buttonLabels()).toEqual(["count 1", "theme b"]);
+        expect(warnings()).toEqual([]);
+      },
+    );
 
     test("a shaped ContextBridge renders its position's provider value in the same commit", async () => {
       const shape = createContextBridgeShape();

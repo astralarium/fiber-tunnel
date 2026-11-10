@@ -16,6 +16,7 @@ import {
   type ContextBridgeShape,
   extendShape,
   shapeContexts,
+  shapeStrict,
   subscribeShape,
   unsubscribeShape,
 } from "./bridge-shape";
@@ -59,7 +60,7 @@ const captures = new WeakMap<ContextBridgeValue, Capture>();
 export interface ContextCaptureProps {
   /** Receives the bridge; rendered in place. */
   children: (bridge: ContextBridgeValue) => ReactNode;
-  /** Adds the captured contexts to this shape at mount. */
+  /** Adds the captured contexts and StrictMode to this shape at mount. */
   shape?: ContextBridgeShape;
 }
 
@@ -139,7 +140,8 @@ export interface ContextBridgeProps {
   bridge: ContextBridgeValue;
   /** Provides every context of the shape, in one order: a new `bridge`
    * keeps the children mounted. A context the bridge lacks provides the
-   * value at this position. Adds the bridge's contexts to the shape.
+   * value at this position. Renders StrictMode once any of the shape's
+   * captures did. Adds the bridge's contexts to the shape.
    * Captures and Ins below follow a new `bridge`; at an Out, their
    * content renders under providers of its own. Shaped captures mounting
    * after the bridge's mount commit remount its children once. */
@@ -286,6 +288,14 @@ const growWarning =
   "fiber-tunnel: a shaped ContextBridge's providers changed; its children " +
   "remount.";
 
+/** What a Bridge render provided. */
+interface Rendered {
+  /** Shaped slots; 0 when unshaped. */
+  slots: number;
+  /** Wrapped in StrictMode. */
+  strict: boolean;
+}
+
 /** Class: reads the native providers above its own fiber. */
 class Bridge extends Component<ContextBridgeProps> {
   /** Read on first render; empty where the fiber is unreadable. */
@@ -294,22 +304,32 @@ class Bridge extends Component<ContextBridgeProps> {
   /** Dev: keys and StrictMode of the last render. */
   keys: string | null = null;
   warned = false;
-  /** Slots of the last shaped render. */
-  slotCount = 0;
+  /** The last committed render. */
+  rendered: Rendered = { slots: 0, strict: false };
+  /** The last render; becomes `rendered` at commit. */
+  pending: Rendered = { slots: 0, strict: false };
   /** Mount commit in progress: growth remounts the children silently. */
   settling = false;
 
-  /** Re-renders when the shape holds contexts the last render lacks. The
-   * shape holds the rendered slots once the bridge extends it. */
+  /** Re-renders when the shape holds contexts or StrictMode the last
+   * committed render lacks. The shape holds the rendered slots once the
+   * bridge extends it. */
   sync = () => {
     const { shape } = this.props;
-    if (!shape || shapeContexts(shape).size === this.slotCount) return;
+    const { slots, strict } = this.rendered;
+    if (
+      !shape ||
+      (shapeContexts(shape).size === slots && shapeStrict(shape) === strict)
+    ) {
+      return;
+    }
     if (this.settling) this.keys = null;
     this.forceUpdate();
   };
 
   componentDidMount() {
     const { shape, bridge } = this.props;
+    this.rendered = this.pending;
     this.settling = true;
     queueMicrotask(() => (this.settling = false));
     if (!shape) return;
@@ -320,6 +340,7 @@ class Bridge extends Component<ContextBridgeProps> {
 
   componentDidUpdate(prev: ContextBridgeProps) {
     const { shape, bridge } = this.props;
+    this.rendered = this.pending;
     if (prev.shape !== shape) {
       if (prev.shape) unsubscribeShape(prev.shape, this.sync);
       if (shape) subscribeShape(shape, this.sync);
@@ -346,7 +367,8 @@ class Bridge extends Component<ContextBridgeProps> {
   render() {
     const { shape, children } = this.props;
     const capture = captures.get(this.props.bridge) ?? emptyCapture;
-    const { strict } = capture;
+    const strict = capture.strict || (!!shape && shapeStrict(shape));
+    this.pending = { slots: 0, strict };
     let node = strict ? <StrictMode>{children}</StrictMode> : children;
     if (!this.native) {
       const fiber = renderingFiberOf(this);
@@ -357,7 +379,7 @@ class Bridge extends Component<ContextBridgeProps> {
     }
     if (shape) {
       const slots = slotsOf(shape, capture, this.native);
-      this.slotCount = slots.length;
+      this.pending.slots = slots.length;
       if (isDevEnv) {
         const ids = slots.map((slot) => slot.id).join(",");
         this.check(`shaped|${strict}|${ids}`, growWarning);
