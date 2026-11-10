@@ -107,22 +107,6 @@ export function Group({ source, core, children }: GroupProps) {
 }
 markSourceProvider(Group);
 
-/** Props of {@link NativeGroup}. */
-interface NativeGroupProps {
-  source: Source;
-  /** The source's value, read by the Out under the source's provider. */
-  value: unknown;
-  children: ReactNode;
-}
-
-/** A source's provider at an Out under that source's own provider: the
- * value updates in the same render as the provider. */
-export function NativeGroup({ source, value, children }: NativeGroupProps) {
-  const Provider = source.context;
-  return <Provider value={value}>{children}</Provider>;
-}
-markSourceProvider(NativeGroup);
-
 /** Props of {@link GroupGate}. */
 interface GroupGateProps {
   source: Source;

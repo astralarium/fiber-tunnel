@@ -1,4 +1,8 @@
 export {
+  type ContextBridgeShape,
+  createContextBridgeShape,
+} from "./bridge-shape";
+export {
   ContextBridge,
   type ContextBridgeProps,
   type ContextBridgeValue,

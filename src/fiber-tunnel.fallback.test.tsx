@@ -13,7 +13,7 @@ import {
 } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { fiberTunnel } from "./fiber-tunnel";
+import { fiberTunnel, transitionsWait } from "./fiber-tunnel";
 import { createSignal, type Signal } from "./signal";
 import { mountDomRoot } from "./test-utils";
 
@@ -168,6 +168,41 @@ describe("transitions", () => {
       expect.stringContaining("the internals check failed"),
     ]);
     await expectPublishAfterCommit(app);
+  });
+
+  test("Outs in one root share a failed check and warn once", async () => {
+    const warnings = spyWarn();
+    doubles.gatesAlwaysComplete = true;
+    const tunnels = [fiberTunnel(), fiberTunnel()];
+    await mountDomRoot(tunnels.map((t, i) => <t.Out key={i} />));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(warnings()).toEqual([
+      expect.stringContaining("the Out's canary failed"),
+    ]);
+    expect(tunnels.map(transitionsWait)).toEqual([false, false]);
+  });
+
+  test("a failed check warns for another tunnel in the root when the first fell back already", async () => {
+    const warnings = spyWarn();
+    doubles.insaneInternals = true;
+    doubles.gatesAlwaysComplete = true;
+    const tunnels = [fiberTunnel(), fiberTunnel()];
+    const [first] = tunnels;
+    render(
+      <first.In>
+        <p>content</p>
+      </first.In>,
+    );
+    await mountDomRoot(tunnels.map((t, i) => <t.Out key={i} />));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(warnings()).toEqual([
+      expect.stringContaining("the internals check failed"),
+      expect.stringContaining("the Out's canary failed"),
+    ]);
   });
 
   test("publishes after commit when the canary fails", async () => {

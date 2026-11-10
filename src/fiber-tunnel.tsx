@@ -30,7 +30,6 @@ import {
   type MicrotaskCheck,
   MicrotaskCheckView,
   MountGate,
-  NativeGroup,
   type StatusOwner,
   StatusView,
   type TunnelCore,
@@ -86,6 +85,7 @@ import {
   type Source,
   sourceAt,
   SourceReader,
+  SourceValue,
   watchdogMs,
 } from "./sources";
 import { type FiberStep, pathKey, type RankCache, sortByKey } from "./util";
@@ -237,6 +237,79 @@ function ranksBelow(fiber: Fiber, anchor: Fiber): number[] {
     ranks.push(rank);
   }
   return ranks.reverse();
+}
+
+/** An Out running a root's checks. */
+interface CheckRunner {
+  /** Committed: a claimed runner stays. */
+  mounted: boolean;
+}
+
+/** A root's reconciler checks, shared by the Outs in it. */
+interface RootChecks {
+  microtask: MicrotaskCheck;
+  canary: Canary;
+  /** Results; null while pending. */
+  microtaskOk: boolean | null;
+  canaryOk: boolean | null;
+  /** The Out rendering the check views. */
+  runner: CheckRunner | null;
+  /** A failure warned once for every tunnel. */
+  warned: boolean;
+  /** Subscribed Outs: called on each result and on a freed runner. */
+  listeners: Set<() => void>;
+}
+
+const checksByRoot = new WeakMap<FiberRootLike, RootChecks>();
+
+function notifyChecks(checks: RootChecks) {
+  for (const listener of checks.listeners) listener();
+}
+
+function createRootChecks(): RootChecks {
+  const checks: RootChecks = {
+    microtask: createMicrotaskCheck((passed) => {
+      checks.microtaskOk = passed;
+      notifyChecks(checks);
+    }),
+    canary: createCanary((passed) => {
+      checks.canaryOk = passed;
+      notifyChecks(checks);
+    }),
+    microtaskOk: null,
+    canaryOk: null,
+    runner: null,
+    warned: false,
+    listeners: new Set(),
+  };
+  return checks;
+}
+
+/** The checks of `root`'s reconciler; an unread root gets its own. */
+function rootChecksOf(root: FiberRootLike | null) {
+  if (!root) return createRootChecks();
+  let checks = checksByRoot.get(root);
+  if (!checks) checksByRoot.set(root, (checks = createRootChecks()));
+  return checks;
+}
+
+function checksPending(checks: RootChecks) {
+  return checks.microtaskOk === null || checks.canaryOk === null;
+}
+
+/** Makes `out` the runner of pending `checks` when none runs them. A
+ * runner that never mounts (a discarded render) frees them after the
+ * render's microtasks. Returns whether `out` runs them. */
+function claimChecks(checks: RootChecks, out: CheckRunner) {
+  if (checks.runner === null && checksPending(checks)) {
+    checks.runner = out;
+    queueMicrotask(() => {
+      if (checks.runner !== out || out.mounted) return;
+      checks.runner = null;
+      notifyChecks(checks);
+    });
+  }
+  return checks.runner === out;
 }
 
 /** Creates a tunnel: content from many Ins renders at one Out, in tree order. */
@@ -522,12 +595,28 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     );
   }
 
-  /** Switches the tunnel to publish-after-commit. */
-  function fallBack(cause: string) {
-    if (transitionFallback !== null) return;
+  /** Switches the tunnel to publish-after-commit. Returns whether it
+   * switched. */
+  function fallBack(cause: string, warn = true) {
+    if (transitionFallback !== null) return false;
     transitionFallback = cause;
-    if (isDevEnv) console.warn(transitionFallbackWarning + cause);
+    if (isDevEnv && warn) console.warn(transitionFallbackWarning + cause);
     releaseProbes();
+    return true;
+  }
+
+  /** Takes an Out's root check results. */
+  function applyChecks(checks: RootChecks) {
+    microtaskOk = checks.microtaskOk;
+    canaryOk = checks.canaryOk;
+    const cause =
+      microtaskOk === false
+        ? "the Out's reconciler missed the microtask check"
+        : canaryOk === false
+          ? "the Out's canary failed"
+          : null;
+    if (cause === null) return;
+    if (fallBack(cause, !checks.warned)) checks.warned = true;
   }
 
   /** Structural release: nothing waits for an absent Out. */
@@ -1080,9 +1169,9 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           cached.children.every((e, i) => e === elements[i]) ? (
             cached.element
           ) : values.has(source) ? (
-            <NativeGroup key={child.key} source={source} value={value}>
+            <SourceValue key={child.key} source={source} value={value}>
               {elements}
-            </NativeGroup>
+            </SourceValue>
           ) : (
             <Group key={child.key} source={source} core={core}>
               {elements}
@@ -1096,44 +1185,71 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     return elements;
   }
 
-  /** Per-Out checks of the Out's reconciler. */
-  interface OutChecks {
-    microtask: MicrotaskCheck;
-    canary: Canary;
-  }
-
-  function createOutChecks(onResult: () => void): OutChecks {
-    return {
-      microtask: createMicrotaskCheck((passed) => {
-        microtaskOk = passed;
-        if (!passed)
-          fallBack("the Out's reconciler missed the microtask check");
-        onResult();
-      }),
-      canary: createCanary((passed) => {
-        canaryOk = passed;
-        if (!passed) fallBack("the Out's canary failed");
-        onResult();
-      }),
-    };
-  }
-
   /** One Out's root and checks. */
-  interface OutState {
+  interface OutState extends CheckRunner {
     root: FiberRootLike | null;
     /** The root's reconciler renders Activity. */
     activity: boolean;
     /** Nearest native provider of each context above the Out. */
     native: ReadonlyMap<unknown, Fiber>;
-    checks: OutChecks | null;
+    /** Bridged: the root's checks, read with the root. */
+    checks: RootChecks | null;
   }
 
   /** Reads the Out's root, then renders its content for that
-   * reconciler. */
+   * reconciler; runs or applies the root's checks. */
   class OutBody extends Component<{
     out: OutState;
     render: (activity: boolean) => ReactNode;
   }> {
+    /** Applies results; re-renders to run or drop the check views. */
+    onChecks = () => {
+      const { out } = this.props;
+      const checks = out.checks!;
+      applyChecks(checks);
+      if (
+        checks.runner === out ||
+        (checks.runner === null && checksPending(checks))
+      ) {
+        this.forceUpdate();
+      }
+    };
+
+    // Hidden or unmounted Outs never hold a transition.
+    componentDidMount() {
+      const { out } = this.props;
+      const checks = out.checks;
+      out.mounted = true;
+      visibleOuts++;
+      if (out.root) outRoots.set(out.root, (outRoots.get(out.root) ?? 0) + 1);
+      if (!checks) return;
+      checks.listeners.add(this.onChecks);
+      applyChecks(checks);
+      // A discarded render freed the runner before this commit.
+      if (checks.runner === null && checksPending(checks)) this.forceUpdate();
+    }
+
+    componentWillUnmount() {
+      const { out } = this.props;
+      const checks = out.checks;
+      out.mounted = false;
+      visibleOuts--;
+      if (out.root) {
+        const count = outRoots.get(out.root)! - 1;
+        if (count) outRoots.set(out.root, count);
+        else outRoots.delete(out.root);
+      }
+      // A StrictMode replay counts the Out again within the commit.
+      queueMicrotask(() => {
+        if (visibleOuts === 0) releaseProbes();
+      });
+      if (!checks) return;
+      checks.listeners.delete(this.onChecks);
+      if (checks.runner !== out) return;
+      checks.runner = null;
+      notifyChecks(checks);
+    }
+
     render() {
       const { out } = this.props;
       if (!out.root) {
@@ -1145,6 +1261,7 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
           out.native = nativeProvidersAbove(fiber);
         }
       }
+      if (bridge && !out.checks) out.checks = rootChecksOf(out.root);
       return this.props.render(out.activity);
     }
   }
@@ -1159,12 +1276,12 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
     );
     // Survives effect replays, so each Out errors once.
     const reportedRef = useRef(false);
-    const [, setChecked] = useState(0);
     const [out] = useState<OutState>(() => ({
       root: null,
       activity: true,
       native: new Map(),
-      checks: bridge ? createOutChecks(() => setChecked((n) => n + 1)) : null,
+      checks: null,
+      mounted: false,
     }));
 
     useLayoutEffect(() => {
@@ -1177,55 +1294,39 @@ export function fiberTunnel(options: FiberTunnelOptions = {}): FiberTunnel {
       return () => void mountedOuts--;
     }, []);
 
-    // Hidden or unmounted Outs never hold a transition.
-    useLayoutEffect(() => {
-      visibleOuts++;
-      const root = out.root;
-      if (root) outRoots.set(root, (outRoots.get(root) ?? 0) + 1);
-      return () => {
-        visibleOuts--;
-        if (root) {
-          const count = outRoots.get(root)! - 1;
-          if (count) outRoots.set(root, count);
-          else outRoots.delete(root);
-        }
-        // A StrictMode replay counts the Out again within the commit.
-        queueMicrotask(() => {
-          if (visibleOuts === 0) releaseProbes();
-        });
-      };
-    }, [out]);
-
     if (current === serverSnapshot) return null;
     const sorted = sortedItems();
-    const checks = out.checks;
     return (
       <OutBody
         out={out}
-        render={(activity) => (
-          <>
-            {bridge ? (
-              <OutGroups
-                key="groups"
-                out={out}
-                sorted={sorted}
-                activity={activity}
-              />
-            ) : (
-              sorted.map((item) => elementOf(item, activity))
-            )}
-            {checks && !checks.microtask.done && (
-              <MicrotaskCheckView key="microtask" check={checks.microtask} />
-            )}
-            {checks && checks.canary.result === "pending" && (
-              <CanaryView
-                key="canary"
-                canary={checks.canary}
-                activity={activity}
-              />
-            )}
-          </>
-        )}
+        render={(activity) => {
+          const checks = out.checks;
+          const runs = checks !== null && claimChecks(checks, out);
+          return (
+            <>
+              {bridge ? (
+                <OutGroups
+                  key="groups"
+                  out={out}
+                  sorted={sorted}
+                  activity={activity}
+                />
+              ) : (
+                sorted.map((item) => elementOf(item, activity))
+              )}
+              {runs && !checks.microtask.done && (
+                <MicrotaskCheckView key="microtask" check={checks.microtask} />
+              )}
+              {runs && checks.canary.result === "pending" && (
+                <CanaryView
+                  key="canary"
+                  canary={checks.canary}
+                  activity={activity}
+                />
+              )}
+            </>
+          );
+        }}
       />
     );
   }

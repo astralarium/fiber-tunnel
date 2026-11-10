@@ -10,7 +10,6 @@ import React, {
   useDeferredValue,
   useLayoutEffect,
   useRef,
-  useSyncExternalStore,
 } from "react";
 
 import { isDevEnv } from "./env";
@@ -77,6 +76,9 @@ export interface SourceGroup {
 /** A transition value the primary commits once every Out renders it. */
 export interface Candidate {
   stamp: Stamped;
+  /** Reader's root: its Outs render the value in the reader's
+   * transition. */
+  root: FiberRootLike | null;
   /** Every waiting Out rendered the value without suspending. */
   ready: Signal;
   /** The primary committed; the Outs may commit. */
@@ -101,7 +103,11 @@ export function markSourceProvider(type: object) {
   sourceProviderTypes.add(type);
 }
 
-function createSource(context: Context<unknown>, value: unknown): Source {
+/** A source holding `value`; a provider's, or a relay's. */
+export function createSource(
+  context: Context<unknown>,
+  value: unknown,
+): Source {
   const listeners = new Set<() => void>();
   const source: Source = {
     id: nextSourceId++,
@@ -310,22 +316,25 @@ const watchdogWarning =
   `within ${watchdogMs} ms; the transition commits unverified.`;
 
 /** The candidate for `value`, started once: the Outs render it in a
- * transition. Ready at once without an Out in another root. */
+ * transition. Ready at once without an Out in another root. `stack`:
+ * dev, the reader's owner stack. */
 export function startCandidate(
   source: Source,
   value: unknown,
   root: FiberRootLike | null,
+  stack = isDevEnv ? (React.captureOwnerStack?.() ?? "") : "",
 ): Candidate {
   let candidate = source.candidates.get(value);
   if (candidate) return candidate;
   candidate = {
     stamp: { value, seq: nextSeq++ },
+    root,
     ready: createSignal(),
     release: createSignal(),
     waiting: new Set(),
     acked: new Set(),
     timer: null,
-    stack: isDevEnv ? (React.captureOwnerStack?.() ?? "") : "",
+    stack,
   };
   source.candidates.set(value, candidate);
   for (const group of source.groups) {
@@ -342,6 +351,8 @@ export function startCandidate(
   startTransition(() => {
     for (const group of waiting) group.setCandidate(stamp);
   });
+  // A relay group can settle while it receives the candidate.
+  if (candidate.ready.done) return candidate;
   const armed = candidate;
   armed.timer = setTimeout(
     () => releaseUnverified(source, armed, missedAckWarning),
@@ -399,6 +410,30 @@ export function removeGroup(source: Source, group: SourceGroup) {
   });
 }
 
+/** A relay's group on its upstream source: the relay's Outs render each
+ * transition value of `upstream` before the upstream commits it. */
+export function relayGroup(upstream: Source, relay: Source): SourceGroup {
+  const group: SourceGroup = {
+    root: null,
+    transitions: () => [...relay.groups].some((g) => g.transitions()),
+    setCandidate(stamp) {
+      const origin = upstream.candidates.get(stamp.value);
+      if (!origin || origin.stamp !== stamp) return;
+      acknowledge(upstream, group, stamp);
+      const ready = () => groupReady(upstream, group, stamp);
+      if (Object.is(stamp.value, relay.committed.value)) return ready();
+      const candidate = startCandidate(
+        relay,
+        stamp.value,
+        origin.root,
+        origin.stack,
+      );
+      void candidate.ready.thenable.then(ready);
+    },
+  };
+  return group;
+}
+
 /** Reads sources in their own tree and publishes each committed value.
  * In a transition render, waits until every Out renders the changed
  * values. */
@@ -447,20 +482,17 @@ export function SourceReader({ source, root, transitions }: SourceReaderProps) {
   return null;
 }
 
-/** Renders a source's committed value as its context. */
-export function SourceProvider({
-  source,
-  children,
-}: {
+/** Props of {@link SourceValue}. */
+interface SourceValueProps {
   source: Source;
+  value: unknown;
   children: ReactNode;
-}) {
-  const { value } = useSyncExternalStore(
-    source.subscribe,
-    source.getCommitted,
-    source.getCommitted,
-  );
+}
+
+/** Provides `value` as `source`'s context; providers below resolve to
+ * `source`. */
+export function SourceValue({ source, value, children }: SourceValueProps) {
   const Provider = source.context;
   return <Provider value={value}>{children}</Provider>;
 }
-markSourceProvider(SourceProvider);
+markSourceProvider(SourceValue);

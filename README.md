@@ -95,6 +95,23 @@ import { ContextBridge, ContextCapture } from "fiber-tunnel";
 </ContextBridge>;
 ```
 
+Use a shared bridge shape to keep children mounted
+even as `bridge` changes.
+
+```tsx
+import { createContextBridgeShape } from "fiber-tunnel";
+
+function Pool() {
+  const [shape] = useState(createContextBridgeShape);
+  // …
+  <ContextCapture shape={shape}>{…}</ContextCapture>;
+
+  <ContextBridge bridge={bridge} shape={shape}>
+    <Item />
+  </ContextBridge>;
+}
+```
+
 ## Options
 
 - `fiberTunnel({ bridge: false })`: content renders as a child of the `Out`.

@@ -31,6 +31,10 @@ import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import {
+  type ContextBridgeShape,
+  createContextBridgeShape,
+} from "./bridge-shape";
 import { ItemView } from "./bridge-views";
 import {
   commitHookOf,
@@ -53,7 +57,7 @@ import {
   FiberAnchorContext,
   type FiberAnchorValue,
 } from "./fiber-anchor-context";
-import { type FiberTunnel, fiberTunnel } from "./fiber-tunnel";
+import { type FiberTunnel, fiberTunnel, transitionsWait } from "./fiber-tunnel";
 import { SourceReader } from "./sources";
 import {
   buttonLabels,
@@ -487,6 +491,27 @@ describe("Out", () => {
     act(() => root.unmount());
     container.remove();
     consoleError.mockRestore();
+  });
+
+  test("a hydrated Out lets its tunnel's transitions wait", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = fiberTunnel();
+    const app = (
+      <>
+        <t.In>
+          <button>Tunneled</button>
+        </t.In>
+        <t.Out />
+      </>
+    );
+    const container = document.createElement("div");
+    container.innerHTML = renderToString(app);
+    document.body.append(container);
+
+    const root = await act(async () => hydrateRoot(container, app));
+    await settleOut(t);
+    act(() => root.unmount());
+    container.remove();
   });
 });
 
@@ -2420,14 +2445,14 @@ describe("bridge", () => {
 
 /** Captures the providers above it; hands the bridge to `onBridge`. */
 function Capture({
-  local,
+  shape,
   onBridge,
 }: {
-  local?: boolean;
+  shape?: ContextBridgeShape;
   onBridge: (bridge: ContextBridgeValue) => void;
 }) {
   return (
-    <ContextCapture local={local}>
+    <ContextCapture shape={shape}>
       {(bridge) => <ReportBridge bridge={bridge} onBridge={onBridge} />}
     </ContextCapture>
   );
@@ -2643,69 +2668,450 @@ describe("ContextCapture", () => {
     expect(seen.at(-1)).toBe("light: bridged light");
   });
 
-  test("a local ContextCapture leaves out contexts a tunnel bridges in", async () => {
-    const t = fiberTunnel();
-    function Scene() {
-      const [local, setLocal] = useState<ContextBridgeValue | null>(null);
-      const [full, setFull] = useState<ContextBridgeValue | null>(null);
-      return (
-        <>
-          <Theme value="in">
-            <t.In>
-              <Capture local onBridge={setLocal} />
-              <Capture onBridge={setFull} />
-            </t.In>
-          </Theme>
-          <t.Out />
-          <Theme value="site">
-            {local && (
-              <ContextBridge bridge={local}>
-                <ThemeLabel name="local" />
-              </ContextBridge>
-            )}
-            {full && (
-              <ContextBridge bridge={full}>
-                <ThemeLabel name="full" />
-              </ContextBridge>
-            )}
-          </Theme>
-        </>
-      );
+  describe("with a shape", () => {
+    /** Theme and Other as text. */
+    function Labels() {
+      return <button>{`theme ${use(Theme)}, other ${use(Other)}`}</button>;
     }
-    render(<Scene />);
-    await flush();
-    await flush();
-    expect(buttonLabels()).toEqual(["local site", "full in"]);
-  });
 
-  test("a local ContextCapture carries providers rendered in tunneled content", async () => {
-    const t = fiberTunnel();
-    function Scene() {
-      const [local, setLocal] = useState<ContextBridgeValue | null>(null);
+    /** Captures "a" (Theme) and "b" (Theme, Other) in `shape`; a site
+     * under Other "site" bridging the chosen one; `b`: capture "b"
+     * mounted. */
+    function ShapeScene({
+      shape,
+      use: which,
+      b = true,
+    }: {
+      shape: ContextBridgeShape;
+      use: "a" | "b";
+      b?: boolean;
+    }) {
+      const { bridges, onA, onB } = useBridges();
+      const bridge = bridges[which];
       return (
         <>
-          <Theme value="in">
-            <t.In>
-              <Theme value="content">
-                <Capture local onBridge={setLocal} />
-              </Theme>
-            </t.In>
+          <Theme value="a">
+            <Capture shape={shape} onBridge={onA} />
           </Theme>
-          <t.Out />
-          <Theme value="site">
-            {local && (
-              <ContextBridge bridge={local}>
-                <ThemeLabel name="local" />
+          {b && (
+            <Theme value="b">
+              <Other value="b">
+                <Capture shape={shape} onBridge={onB} />
+              </Other>
+            </Theme>
+          )}
+          <Other value="site">
+            {bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <Counter name="count" />
+                <Labels />
               </ContextBridge>
             )}
-          </Theme>
+          </Other>
         </>
       );
     }
-    render(<Scene />);
-    await flush();
-    await flush();
-    expect(buttonLabels()).toEqual(["local content"]);
+
+    test("a shaped ContextBridge keeps children mounted across a swap to a bridge with other contexts", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const { rerender } = render(<ShapeScene shape={shape} use="a" />);
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+      expect(buttonLabels()).toEqual(["count 1", "theme a, other site"]);
+
+      rerender(<ShapeScene shape={shape} use="b" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1", "theme b, other b"]);
+
+      rerender(<ShapeScene shape={shape} use="a" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1", "theme a, other site"]);
+      expect(warnings()).toEqual([]);
+    });
+
+    test("a shaped ContextBridge keeps children mounted across a swap under StrictMode", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const { rerender } = render(
+        <StrictMode>
+          <ShapeScene shape={shape} use="a" />
+        </StrictMode>,
+      );
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(
+        <StrictMode>
+          <ShapeScene shape={shape} use="b" />
+        </StrictMode>,
+      );
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1", "theme b, other b"]);
+      expect(warnings()).toEqual([]);
+    });
+
+    test("a shaped ContextBridge remounts children and warns once when its shape gains a context", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const { rerender } = render(
+        <ShapeScene shape={shape} use="a" b={false} />,
+      );
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(<ShapeScene shape={shape} use="a" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 0", "theme a, other site"]);
+      expect(warnings()).toEqual([
+        expect.stringContaining("shaped ContextBridge's providers changed"),
+      ]);
+    });
+
+    test("a shaped ContextBridge re-provides its position's value to captures below it", async () => {
+      const shape = createContextBridgeShape();
+      const seen: string[] = [];
+      function Inner() {
+        const [inner, setInner] = useState<ContextBridgeValue | null>(null);
+        return (
+          <>
+            <Capture onBridge={setInner} />
+            {inner && (
+              <Other value="elsewhere">
+                <ContextBridge bridge={inner}>
+                  <Report />
+                </ContextBridge>
+              </Other>
+            )}
+          </>
+        );
+      }
+      function Report() {
+        const value = `${use(Theme)}/${use(Other)}`;
+        useLayoutEffect(() => void seen.push(value), [value]);
+        return null;
+      }
+      function Scene() {
+        const { bridges, onA, onB } = useBridges();
+        return (
+          <>
+            <Theme value="a">
+              <Capture shape={shape} onBridge={onA} />
+            </Theme>
+            <Other value="b">
+              <Capture shape={shape} onBridge={onB} />
+            </Other>
+            <Other value="site">
+              {bridges.a && bridges.b && (
+                <ContextBridge bridge={bridges.a} shape={shape}>
+                  <Inner />
+                </ContextBridge>
+              )}
+            </Other>
+          </>
+        );
+      }
+      render(<Scene />);
+      await flush();
+      await flush();
+      expect(seen.at(-1)).toBe("a/site");
+    });
+
+    test("a shaped ContextBridge takes contexts from captures mounting before it in its commit", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      function Scene({ show, use: which }: { show: boolean; use: "a" | "b" }) {
+        const { bridges, onA, onB } = useBridges();
+        const bridge = bridges[which] ?? bridges.a;
+        return (
+          <>
+            <Theme value="a">
+              <Capture shape={shape} onBridge={onA} />
+            </Theme>
+            {show && (
+              <Theme value="b">
+                <Other value="b">
+                  <Capture shape={shape} onBridge={onB} />
+                </Other>
+              </Theme>
+            )}
+            {show && bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <Counter name="count" />
+              </ContextBridge>
+            )}
+          </>
+        );
+      }
+      const { rerender } = render(<Scene show={false} use="a" />);
+      await flush();
+      rerender(<Scene show use="a" />);
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(<Scene show use="b" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1"]);
+      expect(warnings()).toEqual([]);
+    });
+
+    test("a shaped ContextBridge takes contexts from captures mounting after it in its commit", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      function Scene({ show, use: which }: { show: boolean; use: "a" | "b" }) {
+        const { bridges, onA, onB } = useBridges();
+        const bridge = bridges[which] ?? bridges.a;
+        return (
+          <>
+            <Theme value="a">
+              <Capture shape={shape} onBridge={onA} />
+            </Theme>
+            {show && bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <Counter name="count" />
+              </ContextBridge>
+            )}
+            {show && (
+              <Theme value="b">
+                <Other value="b">
+                  <Capture shape={shape} onBridge={onB} />
+                </Other>
+              </Theme>
+            )}
+          </>
+        );
+      }
+      const { rerender } = render(<Scene show={false} use="a" />);
+      await flush();
+      rerender(<Scene show use="a" />);
+      await flush();
+      fireEvent.click(screen.getByRole("button", { name: "count 0" }));
+
+      rerender(<Scene show use="b" />);
+      await flush();
+      expect(buttonLabels()).toEqual(["count 1"]);
+      expect(warnings()).toEqual([]);
+    });
+
+    test("a shaped ContextBridge renders its position's provider value in the same commit", async () => {
+      const shape = createContextBridgeShape();
+      const seen: string[] = [];
+      function Reader({ tag }: { tag: string }) {
+        const value = use(Theme);
+        useLayoutEffect(() => void seen.push(`${tag}:${value}`));
+        return null;
+      }
+      function Scene({ theme }: { theme: string }) {
+        const [bridge, setBridge] = useState<ContextBridgeValue | null>(null);
+        return (
+          <Theme value={theme}>
+            <Capture shape={shape} onBridge={setBridge} />
+            <Reader tag="site" />
+            {bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <Reader tag="bridged" />
+              </ContextBridge>
+            )}
+          </Theme>
+        );
+      }
+      const { rerender } = render(<Scene theme="x" />);
+      await flush();
+      seen.length = 0;
+
+      rerender(<Scene theme="y" />);
+      await flush();
+      expect(seen).toEqual(["site:y", "bridged:y"]);
+    });
+
+    test("a shaped ContextBridge keeps a transition at its position pending", async () => {
+      const shape = createContextBridgeShape();
+      const resource = createResource<string>();
+      resource.resolve("x");
+      function Child() {
+        const theme = use(Theme);
+        resource.useData(theme);
+        return <button>{theme}</button>;
+      }
+      const control = createRef<SetTheme>();
+      function Scene() {
+        const [bridge, setBridge] = useState<ContextBridgeValue | null>(null);
+        return (
+          <ThemeHost initial="x" control={control}>
+            <Capture shape={shape} onBridge={setBridge} />
+            {bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <Suspense fallback={<button>fallback</button>}>
+                  <Child />
+                </Suspense>
+              </ContextBridge>
+            )}
+          </ThemeHost>
+        );
+      }
+      render(<Scene />);
+      await flush();
+
+      await act(async () => startTransition(() => control.current!("y")));
+      await flush();
+      expect(buttonLabels()).toEqual(["x"]);
+    });
+
+    /** Captures "a" and "b" in `shape`; the chosen bridge renders an In
+     * of `t` whose content loads per Theme. */
+    function TunnelScene({
+      shape,
+      t,
+      data,
+      use: which,
+    }: {
+      shape: ContextBridgeShape;
+      t: FiberTunnel;
+      data: ReturnType<typeof createResource<string>>;
+      use: "a" | "b";
+    }) {
+      const { bridges, onA, onB } = useBridges();
+      const bridge = bridges[which];
+      return (
+        <>
+          <Theme value="a">
+            <Capture shape={shape} onBridge={onA} />
+          </Theme>
+          <Theme value="b">
+            <Capture shape={shape} onBridge={onB} />
+          </Theme>
+          <output>{which}</output>
+          {bridge && (
+            <ContextBridge bridge={bridge} shape={shape}>
+              <t.In>
+                <Loaded data={data} />
+              </t.In>
+            </ContextBridge>
+          )}
+        </>
+      );
+    }
+
+    /** Theme as a label, once `data` loads it. */
+    function Loaded({
+      data,
+    }: {
+      data: ReturnType<typeof createResource<string>>;
+    }) {
+      const theme = use(Theme);
+      data.useData(theme);
+      return <button>{`content ${theme}`}</button>;
+    }
+
+    test("an In inside a shaped ContextBridge renders the new bridge's values at the Out after a swap", async () => {
+      const shape = createContextBridgeShape();
+      const t = fiberTunnel();
+      const data = createResource<string>();
+      data.resolve("a");
+      data.resolve("b");
+      const out = await mountDomRoot(<t.Out />);
+      const { rerender } = render(
+        <TunnelScene shape={shape} t={t} data={data} use="a" />,
+      );
+      await flush();
+      expect(labelsIn(out.container)).toEqual(["content a"]);
+
+      rerender(<TunnelScene shape={shape} t={t} data={data} use="b" />);
+      await flush();
+      expect(labelsIn(out.container)).toEqual(["content b"]);
+    });
+
+    test("a shaped ContextBridge's swap in a transition waits for the Out of an In inside it", async () => {
+      const shape = createContextBridgeShape();
+      const t = fiberTunnel();
+      const data = createResource<string>();
+      data.resolve("a");
+      const out = await mountDomRoot(<t.Out />);
+      const primary = render(
+        <TunnelScene shape={shape} t={t} data={data} use="a" />,
+      );
+      await settleOut(t);
+      await flush();
+      expect(labelsIn(out.container)).toEqual(["content a"]);
+
+      await act(async () =>
+        startTransition(() =>
+          primary.rerender(
+            <TunnelScene shape={shape} t={t} data={data} use="b" />,
+          ),
+        ),
+      );
+      expect(primary.container.querySelector("output")).toHaveTextContent("a");
+      expect(labelsIn(out.container)).toEqual(["content a"]);
+
+      await act(async () => data.resolve("b"));
+      await flush();
+      expect(primary.container.querySelector("output")).toHaveTextContent("b");
+      expect(labelsIn(out.container)).toEqual(["content b"]);
+    });
+
+    test("a transition at a shaped ContextBridge's captured provider waits for the Out of an In inside it", async () => {
+      const shape = createContextBridgeShape();
+      const t = fiberTunnel();
+      const data = createResource<string>();
+      data.resolve("dark");
+      const control = createRef<SetTheme>();
+      function Site() {
+        return <output>{use(Theme)}</output>;
+      }
+      function Scene() {
+        const [bridge, setBridge] = useState<ContextBridgeValue | null>(null);
+        return (
+          <>
+            <ThemeHost initial="dark" control={control}>
+              <Capture shape={shape} onBridge={setBridge} />
+              <Site />
+            </ThemeHost>
+            {bridge && (
+              <ContextBridge bridge={bridge} shape={shape}>
+                <t.In>
+                  <Loaded data={data} />
+                </t.In>
+              </ContextBridge>
+            )}
+          </>
+        );
+      }
+      const out = await mountDomRoot(<t.Out />);
+      const primary = render(<Scene />);
+      await settleOut(t);
+      await flush();
+      expect(labelsIn(out.container)).toEqual(["content dark"]);
+
+      await act(async () => startTransition(() => control.current!("light")));
+      expect(primary.container.querySelector("output")).toHaveTextContent(
+        "dark",
+      );
+      expect(labelsIn(out.container)).toEqual(["content dark"]);
+
+      await act(async () => data.resolve("light"));
+      await flush();
+      expect(primary.container.querySelector("output")).toHaveTextContent(
+        "light",
+      );
+      expect(labelsIn(out.container)).toEqual(["content light"]);
+    });
+
+    test("a shape warns once when it holds over 64 contexts", async () => {
+      const warnings = spyWarn();
+      const shape = createContextBridgeShape();
+      const contexts = Array.from({ length: 66 }, () => createContext(0));
+      const captures = contexts.map((Context, i) => (
+        <Context key={i} value={i}>
+          <Capture shape={shape} onBridge={() => {}} />
+        </Context>
+      ));
+      render(<>{captures}</>);
+      await flush();
+      expect(warnings()).toEqual([
+        expect.stringContaining("ContextBridgeShape holds over 64 contexts"),
+      ]);
+    });
   });
 });
 
@@ -2919,6 +3325,18 @@ async function setupMountApp({
 }
 
 describe("transitions", () => {
+  test("an Out joining a root with passed checks lets its tunnel's transitions wait", async () => {
+    const tunnels = [fiberTunnel(), fiberTunnel()];
+    function Outs({ count }: { count: number }) {
+      return tunnels.slice(0, count).map((t, i) => <t.Out key={i} />);
+    }
+    const { root } = await mountDomRoot(<Outs count={1} />);
+    await settleOut(tunnels[0]);
+
+    await act(async () => root.render(<Outs count={2} />));
+    expect(transitionsWait(tunnels[1])).toBe(true);
+  });
+
   test("keeps the primary pending until the Out can render the new value", async () => {
     const app = await setupUpdateApp();
     expect(app.output()).toBe("1");
